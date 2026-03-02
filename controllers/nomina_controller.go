@@ -586,20 +586,21 @@ func UpdateEmployeeDetails(c *gin.Context) {
 // GeneratePayment calcula y guarda un pago de nómina
 func GeneratePayment(c *gin.Context) {
 	var input struct {
-		UserID           uint      `json:"user_id" binding:"required"`
-		PeriodStart      time.Time `json:"period_start"`
-		PeriodEnd        time.Time `json:"period_end"`
-		DaysWorked       int       `json:"days_worked"` // Días trabajados (solo para pay_type=daily)
-		SundaysQty       int       `json:"sundays_qty"`
-		MadrugonesQty    float64   `json:"madrugones_qty"`
-		Advance          int64     `json:"advance"`
-		Commission       int64     `json:"commission"` // Comisión por administración POS (solo 2da quincena)
-		IsPartial        bool      `json:"is_partial"` // Si es pago parcial (sin comisión aún)
-		IncludesSecurity bool      `json:"includes_security"`
-		Aditions         string    `json:"aditions"`   // JSON string
-		Deductions       string    `json:"deductions"` // JSON string
-		Notes            string    `json:"notes"`
-		CreatedBy        string    `json:"created_by"`
+		UserID               uint      `json:"user_id" binding:"required"`
+		PeriodStart          time.Time `json:"period_start"`
+		PeriodEnd            time.Time `json:"period_end"`
+		DaysWorked           int       `json:"days_worked"` // Días trabajados (solo para pay_type=daily)
+		SundaysQty           int       `json:"sundays_qty"`
+		MadrugonesQty        float64   `json:"madrugones_qty"`
+		Advance              int64     `json:"advance"`
+		Commission           int64     `json:"commission"` // Comisión por administración POS (solo 2da quincena)
+		IsPartial            bool      `json:"is_partial"` // Si es pago parcial (sin comisión aún)
+		IncludesSecurity     bool      `json:"includes_security"`
+		IncludesTransportAid *bool     `json:"includes_transport_aid"`
+		Aditions             string    `json:"aditions"`   // JSON string
+		Deductions           string    `json:"deductions"` // JSON string
+		Notes                string    `json:"notes"`
+		CreatedBy            string    `json:"created_by"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -642,7 +643,11 @@ func GeneratePayment(c *gin.Context) {
 
 	// Auxilio Transporte Quincenal = Auxilio / 2 (solo para salario fijo)
 	var transport int64
-	if payType != "daily" {
+	includesTransportAid := payType != "daily"
+	if input.IncludesTransportAid != nil {
+		includesTransportAid = payType != "daily" && *input.IncludesTransportAid
+	}
+	if includesTransportAid {
 		transport = global.AuxilioTransporte / 2
 	}
 
@@ -694,31 +699,32 @@ func GeneratePayment(c *gin.Context) {
 
 	// 5. Guardar Pago
 	payment := models.NominaPayment{
-		UserID:           input.UserID,
-		PeriodStart:      input.PeriodStart,
-		PeriodEnd:        input.PeriodEnd,
-		BaseSalary:       payroll.BaseSalary,
-		DailyRate:        payroll.DailyRate,
-		PayType:          payType,
-		DaysWorked:       input.DaysWorked,
-		PaidBase:         paidBase,
-		TransportAid:     transport,
-		SundaysQty:       input.SundaysQty,
-		SundaysTotal:     sundaysTotal,
-		MadrugonesQty:    input.MadrugonesQty,
-		MadrugonesTotal:  madrugonesTotal,
-		IncludesSecurity: input.IncludesSecurity,
-		Health:           health,
-		Pension:          pension,
-		Advance:          input.Advance,
-		Commission:       input.Commission,
-		IsPartial:        isPartial,
-		Aditions:         input.Aditions,
-		Deductions:       input.Deductions,
-		TotalPaid:        totalPaid,
-		Notes:            input.Notes,
-		CreatedBy:        input.CreatedBy,
-		CreatedAt:        time.Now(),
+		UserID:               input.UserID,
+		PeriodStart:          input.PeriodStart,
+		PeriodEnd:            input.PeriodEnd,
+		BaseSalary:           payroll.BaseSalary,
+		DailyRate:            payroll.DailyRate,
+		PayType:              payType,
+		DaysWorked:           input.DaysWorked,
+		PaidBase:             paidBase,
+		TransportAid:         transport,
+		SundaysQty:           input.SundaysQty,
+		SundaysTotal:         sundaysTotal,
+		MadrugonesQty:        input.MadrugonesQty,
+		MadrugonesTotal:      madrugonesTotal,
+		IncludesTransportAid: includesTransportAid,
+		IncludesSecurity:     input.IncludesSecurity,
+		Health:               health,
+		Pension:              pension,
+		Advance:              input.Advance,
+		Commission:           input.Commission,
+		IsPartial:            isPartial,
+		Aditions:             input.Aditions,
+		Deductions:           input.Deductions,
+		TotalPaid:            totalPaid,
+		Notes:                input.Notes,
+		CreatedBy:            input.CreatedBy,
+		CreatedAt:            time.Now(),
 	}
 
 	if err := DB.Create(&payment).Error; err != nil {

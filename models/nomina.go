@@ -52,12 +52,13 @@ type NominaPayment struct {
 	MadrugonesQty   float64 `json:"madrugones_qty"`   // Horas
 	MadrugonesTotal int64   `json:"madrugones_total"` // Valor total madrugones
 
-	IncludesSecurity bool  `json:"includes_security"`               // Si incluyó seguridad social
-	Health           int64 `json:"health"`                          // Deducción 4%
-	Pension          int64 `json:"pension"`                         // Deducción 4%
-	Advance          int64 `json:"advance"`                         // Adelanto descontado
-	Commission       int64 `json:"commission"`                      // Comisión por administración de POS (solo 2da quincena)
-	IsPartial        bool  `json:"is_partial" gorm:"default:false"` // True = pago parcial, pendiente de comisión
+	IncludesTransportAid bool  `json:"includes_transport_aid" gorm:"default:true"` // Si incluyó auxilio transporte
+	IncludesSecurity     bool  `json:"includes_security"`                          // Si incluyó seguridad social
+	Health               int64 `json:"health"`                                     // Deducción 4%
+	Pension              int64 `json:"pension"`                                    // Deducción 4%
+	Advance              int64 `json:"advance"`                                    // Adelanto descontado
+	Commission           int64 `json:"commission"`                                 // Comisión por administración de POS (solo 2da quincena)
+	IsPartial            bool  `json:"is_partial" gorm:"default:false"`            // True = pago parcial, pendiente de comisión
 
 	// JSON fields for extensibility
 	Aditions   string `gorm:"type:json" json:"aditions"`   // []{Label, Value}

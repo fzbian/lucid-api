@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -301,7 +302,52 @@ func generateSignatureToken() (plain string, hash string, err error) {
 	return plain, hash, nil
 }
 
+func normalizePublicBaseURL(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+
+	u, err := url.Parse(v)
+	if err != nil || strings.TrimSpace(u.Scheme) == "" || strings.TrimSpace(u.Host) == "" {
+		return ""
+	}
+
+	path := strings.TrimRight(strings.TrimSpace(u.Path), "/")
+	if path == "/" {
+		path = ""
+	}
+
+	return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, path)
+}
+
+func resolveConfiguredSigningBaseURL() string {
+	keys := []string{
+		"SIGNING_BASE_URL",
+		"PAYROLL_SIGN_BASE_URL",
+		"FRONTEND_BASE_URL",
+		"CLIENT_BASE_URL",
+		"CLIENT_APP_BASE_URL",
+	}
+
+	for _, key := range keys {
+		if base := normalizePublicBaseURL(os.Getenv(key)); base != "" {
+			return base
+		}
+	}
+
+	return ""
+}
+
 func resolveRequestBaseURL(c *gin.Context) string {
+	if configured := resolveConfiguredSigningBaseURL(); configured != "" {
+		return configured
+	}
+
+	if origin := normalizePublicBaseURL(c.GetHeader("Origin")); origin != "" {
+		return origin
+	}
+
 	scheme := "http"
 	if c.Request.TLS != nil {
 		scheme = "https"
@@ -315,7 +361,7 @@ func resolveRequestBaseURL(c *gin.Context) string {
 		host = c.Request.Host
 	}
 
-	return fmt.Sprintf("%s://%s", scheme, host)
+	return strings.TrimRight(fmt.Sprintf("%s://%s", scheme, host), "/")
 }
 
 // ServePaymentSigningPage renderiza una vista básica para firmar comprobantes por token.
@@ -918,7 +964,7 @@ func CreatePaymentSignLink(c *gin.Context) {
 		return
 	}
 
-	signingURL := fmt.Sprintf("%s/firma/%s", resolveRequestBaseURL(c), token)
+	signingURL := fmt.Sprintf("%s/firma/%s", strings.TrimRight(resolveRequestBaseURL(c), "/"), token)
 	dispatchMode := dispatchSignatureLinkPreview(&payment, &user, signingURL)
 
 	c.JSON(http.StatusOK, gin.H{

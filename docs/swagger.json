@@ -1,0 +1,972 @@
+{
+    "swagger": "2.0",
+    "info": {
+        "description": "API para gestionar categorias, transacciones, caja y logs. Documentación generada con swaggo.",
+        "title": "ATM API",
+        "contact": {
+            "name": "Soporte",
+            "email": "soporte@example.com"
+        },
+        "version": "1.0"
+    },
+    "host": "localhost:8080",
+    "basePath": "/",
+    "paths": {
+        "/api/caja": {
+            "get": {
+                "description": "Si solo_caja=true, devuelve solo los saldos locales (caja 1 y caja 2). Si no, devuelve saldos locales y saldos de Odoo (POS) combinados.",
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Obtener saldo en caja",
+                "parameters": [
+                    {
+                        "type": "boolean",
+                        "description": "Solo saldo de caja local (sin Odoo)",
+                        "name": "solo_caja",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Caja"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/categorias": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Listar categorias",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Categoria"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Crear categoria",
+                "parameters": [
+                    {
+                        "description": "Categoria",
+                        "name": "categoria",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.CategoriaCreateInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Categoria"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/categorias/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Obtener categoria por id",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Categoria"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Actualizar categoria (parcial)",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Campos a actualizar (parcial)",
+                        "name": "categoria",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/models.CategoriaUpdateInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Categoria"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Eliminar categoria",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/cuenta/retiro": {
+            "post": {
+                "description": "Crea un EGRESO en caja_id=2 por el monto indicado y, en la misma operación, crea un INGRESO en caja_id=1 por el mismo monto. La operación es atómica.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Retiro en cuenta bancaria (caja_2) con ingreso automático en efectivo (caja_1)",
+                "parameters": [
+                    {
+                        "description": "Datos del retiro desde la cuenta bancaria (usa categorias fijas: egreso=30, ingreso=20)",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/controllers.RetiroCuentaRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/limpiar": {
+            "post": {
+                "description": "Elimina todas las transacciones, logs, caja, y categorías (deja la estructura vacía)",
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Eliminar todos los datos de la base de datos",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/logs": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Listar logs de transacciones",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/notify/test": {
+            "get": {
+                "description": "Envía un mensaje de prueba al chat fijo 'atm' usando NOTIFY_URL (nuevo formato /whatsapp/send-text). Por defecto envía \"ping\".",
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Enviar mensaje de prueba de notificación",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Texto a enviar",
+                        "name": "text",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/odoo/cashout": {
+            "post": {
+                "description": "Realiza una retirada de caja (cash out) en una sesión de POS abierta en Odoo. Usa credenciales de entorno ODOO_*.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Cash out en Odoo POS",
+                "parameters": [
+                    {
+                        "description": "Cash out request (usuario puede ir en body o como query param). Si categoria_id == 16 (Efectivos Puntos de Venta), crea ingreso interno en caja_id=1.",
+                        "name": "payload",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/controllers.cashOutRequest"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Usuario que realiza el cashout (alternativo a body.usuario)",
+                        "name": "usuario",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/odoo.CashOutResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/odoo/pos": {
+            "get": {
+                "description": "Devuelve los nombres de los puntos de venta disponibles en Odoo usando las credenciales ODOO_* del entorno.",
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Listar nombres de POS en Odoo",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/resumen": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Obtener resumen financiero (vista resumen_financiero)",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/transacciones": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Listar transacciones",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Número máximo de movimientos a devolver",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fecha inicio (RFC3339 o YYYY-MM-DD)",
+                        "name": "from",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Fecha fin (RFC3339 o YYYY-MM-DD)",
+                        "name": "to",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Tipo de movimiento: INGRESO|EGRESO",
+                        "name": "tipo",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Filtrar por ID de caja",
+                        "name": "caja_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Buscar por descripcion (texto parcial)",
+                        "name": "descripcion",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "array",
+                            "items": {
+                                "$ref": "#/definitions/models.Transaccion"
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Crear transaccion",
+                "parameters": [
+                    {
+                        "description": "Transaccion (requiere caja_id)",
+                        "name": "transaccion",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.TransaccionCreateInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/models.Transaccion"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "/api/transacciones/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Obtener transaccion por id",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Transaccion"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Actualizar transaccion parcialmente",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Campos a actualizar (parcial). Debe incluir caja_id en body o query.",
+                        "name": "transaccion",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/models.TransaccionUpdateInput"
+                        }
+                    },
+                    {
+                        "type": "string",
+                        "description": "Usuario que actualiza la transacción",
+                        "name": "usuario",
+                        "in": "query",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "ID de caja (obligatorio si no se envía en el body)",
+                        "name": "caja_id",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/models.Transaccion"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "delete": {
+                "produces": [
+                    "application/json"
+                ],
+                "summary": "Eliminar transaccion",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Usuario que elimina la transacción",
+                        "name": "usuario",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "controllers.RetiroCuentaRequest": {
+            "type": "object",
+            "required": [
+                "descripcion",
+                "monto",
+                "usuario"
+            ],
+            "properties": {
+                "descripcion": {
+                    "type": "string"
+                },
+                "monto": {
+                    "type": "number"
+                },
+                "usuario": {
+                    "type": "string"
+                }
+            }
+        },
+        "controllers.cashOutRequest": {
+            "type": "object",
+            "required": [
+                "amount",
+                "category_name",
+                "pos_name",
+                "reason"
+            ],
+            "properties": {
+                "amount": {
+                    "type": "number"
+                },
+                "categoria_id": {
+                    "type": "integer"
+                },
+                "category_name": {
+                    "type": "string"
+                },
+                "pos_name": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "usuario": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Caja": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "saldo": {
+                    "type": "number"
+                },
+                "ultima_actualizacion": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.CajaOdoo": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "locales": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "number",
+                        "format": "float64"
+                    }
+                },
+                "saldo_caja": {
+                    "type": "number"
+                },
+                "saldo_caja2": {
+                    "type": "number"
+                },
+                "saldo_total": {
+                    "type": "number"
+                },
+                "total_locales": {
+                    "type": "number"
+                },
+                "ultima_actualizacion": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Categoria": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "nombre": {
+                    "type": "string"
+                },
+                "tipo": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.CategoriaCreateInput": {
+            "type": "object",
+            "required": [
+                "nombre",
+                "tipo"
+            ],
+            "properties": {
+                "nombre": {
+                    "type": "string"
+                },
+                "tipo": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.CategoriaUpdateInput": {
+            "type": "object",
+            "properties": {
+                "nombre": {
+                    "type": "string"
+                },
+                "tipo": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.Transaccion": {
+            "type": "object",
+            "properties": {
+                "caja_id": {
+                    "type": "integer"
+                },
+                "categoria_id": {
+                    "type": "integer"
+                },
+                "descripcion": {
+                    "type": "string"
+                },
+                "fecha": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "monto": {
+                    "type": "number"
+                },
+                "usuario": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.TransaccionCreateInput": {
+            "type": "object",
+            "required": [
+                "caja_id",
+                "categoria_id",
+                "descripcion",
+                "monto",
+                "usuario"
+            ],
+            "properties": {
+                "caja_id": {
+                    "type": "integer"
+                },
+                "categoria_id": {
+                    "type": "integer"
+                },
+                "descripcion": {
+                    "type": "string"
+                },
+                "monto": {
+                    "type": "number"
+                },
+                "usuario": {
+                    "type": "string"
+                }
+            }
+        },
+        "models.TransaccionUpdateInput": {
+            "type": "object",
+            "properties": {
+                "caja_id": {
+                    "type": "integer"
+                },
+                "categoria_id": {
+                    "type": "integer"
+                },
+                "descripcion": {
+                    "type": "string"
+                },
+                "monto": {
+                    "type": "number"
+                }
+            }
+        },
+        "odoo.CashOutResult": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                },
+                "mysql": {
+                    "type": "boolean"
+                },
+                "mysql_error": {
+                    "type": "string"
+                },
+                "ok": {
+                    "type": "boolean"
+                },
+                "session_id": {
+                    "type": "integer"
+                }
+            }
+        }
+    }
+}

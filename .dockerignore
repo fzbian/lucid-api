@@ -1,0 +1,15 @@
+.git
+.gitignore
+.vscode
+.DS_Store
+
+.env
+*.md
+LICENSE
+NOTICE
+
+uploads
+
+tmp
+bin
+dist

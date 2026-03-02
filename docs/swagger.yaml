@@ -1,0 +1,663 @@
+basePath: /
+definitions:
+  controllers.RetiroCuentaRequest:
+    properties:
+      descripcion:
+        type: string
+      monto:
+        type: number
+      usuario:
+        type: string
+    required:
+    - descripcion
+    - monto
+    - usuario
+    type: object
+  controllers.cashOutRequest:
+    properties:
+      amount:
+        type: number
+      categoria_id:
+        type: integer
+      category_name:
+        type: string
+      pos_name:
+        type: string
+      reason:
+        type: string
+      usuario:
+        type: string
+    required:
+    - amount
+    - category_name
+    - pos_name
+    - reason
+    type: object
+  models.Caja:
+    properties:
+      id:
+        type: integer
+      saldo:
+        type: number
+      ultima_actualizacion:
+        type: string
+    type: object
+  models.CajaOdoo:
+    properties:
+      id:
+        type: integer
+      locales:
+        additionalProperties:
+          format: float64
+          type: number
+        type: object
+      saldo_caja:
+        type: number
+      saldo_caja2:
+        type: number
+      saldo_total:
+        type: number
+      total_locales:
+        type: number
+      ultima_actualizacion:
+        type: string
+    type: object
+  models.Categoria:
+    properties:
+      created_at:
+        type: string
+      id:
+        type: integer
+      nombre:
+        type: string
+      tipo:
+        type: string
+    type: object
+  models.CategoriaCreateInput:
+    properties:
+      nombre:
+        type: string
+      tipo:
+        type: string
+    required:
+    - nombre
+    - tipo
+    type: object
+  models.CategoriaUpdateInput:
+    properties:
+      nombre:
+        type: string
+      tipo:
+        type: string
+    type: object
+  models.Transaccion:
+    properties:
+      caja_id:
+        type: integer
+      categoria_id:
+        type: integer
+      descripcion:
+        type: string
+      fecha:
+        type: string
+      id:
+        type: integer
+      monto:
+        type: number
+      usuario:
+        type: string
+    type: object
+  models.TransaccionCreateInput:
+    properties:
+      caja_id:
+        type: integer
+      categoria_id:
+        type: integer
+      descripcion:
+        type: string
+      monto:
+        type: number
+      usuario:
+        type: string
+    required:
+    - caja_id
+    - categoria_id
+    - descripcion
+    - monto
+    - usuario
+    type: object
+  models.TransaccionUpdateInput:
+    properties:
+      caja_id:
+        type: integer
+      categoria_id:
+        type: integer
+      descripcion:
+        type: string
+      monto:
+        type: number
+    type: object
+  odoo.CashOutResult:
+    properties:
+      message:
+        type: string
+      mysql:
+        type: boolean
+      mysql_error:
+        type: string
+      ok:
+        type: boolean
+      session_id:
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: soporte@example.com
+    name: Soporte
+  description: API para gestionar categorias, transacciones, caja y logs. Documentación
+    generada con swaggo.
+  title: ATM API
+  version: "1.0"
+paths:
+  /api/caja:
+    get:
+      description: Si solo_caja=true, devuelve solo los saldos locales (caja 1 y caja
+        2). Si no, devuelve saldos locales y saldos de Odoo (POS) combinados.
+      parameters:
+      - description: Solo saldo de caja local (sin Odoo)
+        in: query
+        name: solo_caja
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Caja'
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Obtener saldo en caja
+  /api/categorias:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Categoria'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Listar categorias
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Categoria
+        in: body
+        name: categoria
+        required: true
+        schema:
+          $ref: '#/definitions/models.CategoriaCreateInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Categoria'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Crear categoria
+  /api/categorias/{id}:
+    delete:
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Eliminar categoria
+    get:
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Categoria'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Obtener categoria por id
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Campos a actualizar (parcial)
+        in: body
+        name: categoria
+        schema:
+          $ref: '#/definitions/models.CategoriaUpdateInput'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Categoria'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Actualizar categoria (parcial)
+  /api/cuenta/retiro:
+    post:
+      consumes:
+      - application/json
+      description: Crea un EGRESO en caja_id=2 por el monto indicado y, en la misma
+        operación, crea un INGRESO en caja_id=1 por el mismo monto. La operación es
+        atómica.
+      parameters:
+      - description: 'Datos del retiro desde la cuenta bancaria (usa categorias fijas:
+          egreso=30, ingreso=20)'
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/controllers.RetiroCuentaRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Retiro en cuenta bancaria (caja_2) con ingreso automático en efectivo
+        (caja_1)
+  /api/limpiar:
+    post:
+      description: Elimina todas las transacciones, logs, caja, y categorías (deja
+        la estructura vacía)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Eliminar todos los datos de la base de datos
+  /api/logs:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              additionalProperties: true
+              type: object
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Listar logs de transacciones
+  /api/notify/test:
+    get:
+      description: Envía un mensaje de prueba al chat fijo 'atm' usando NOTIFY_URL
+        (nuevo formato /whatsapp/send-text). Por defecto envía "ping".
+      parameters:
+      - description: Texto a enviar
+        in: query
+        name: text
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Enviar mensaje de prueba de notificación
+  /api/odoo/cashout:
+    post:
+      consumes:
+      - application/json
+      description: Realiza una retirada de caja (cash out) en una sesión de POS abierta
+        en Odoo. Usa credenciales de entorno ODOO_*.
+      parameters:
+      - description: Cash out request (usuario puede ir en body o como query param).
+          Si categoria_id == 16 (Efectivos Puntos de Venta), crea ingreso interno
+          en caja_id=1.
+        in: body
+        name: payload
+        required: true
+        schema:
+          $ref: '#/definitions/controllers.cashOutRequest'
+      - description: Usuario que realiza el cashout (alternativo a body.usuario)
+        in: query
+        name: usuario
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/odoo.CashOutResult'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Cash out en Odoo POS
+  /api/odoo/pos:
+    get:
+      description: Devuelve los nombres de los puntos de venta disponibles en Odoo
+        usando las credenciales ODOO_* del entorno.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              type: string
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Listar nombres de POS en Odoo
+  /api/resumen:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Obtener resumen financiero (vista resumen_financiero)
+  /api/transacciones:
+    get:
+      parameters:
+      - description: Número máximo de movimientos a devolver
+        in: query
+        name: limit
+        type: integer
+      - description: Fecha inicio (RFC3339 o YYYY-MM-DD)
+        in: query
+        name: from
+        type: string
+      - description: Fecha fin (RFC3339 o YYYY-MM-DD)
+        in: query
+        name: to
+        type: string
+      - description: 'Tipo de movimiento: INGRESO|EGRESO'
+        in: query
+        name: tipo
+        type: string
+      - description: Filtrar por ID de caja
+        in: query
+        name: caja_id
+        type: integer
+      - description: Buscar por descripcion (texto parcial)
+        in: query
+        name: descripcion
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Transaccion'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Listar transacciones
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Transaccion (requiere caja_id)
+        in: body
+        name: transaccion
+        required: true
+        schema:
+          $ref: '#/definitions/models.TransaccionCreateInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Transaccion'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Crear transaccion
+  /api/transacciones/{id}:
+    delete:
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Usuario que elimina la transacción
+        in: query
+        name: usuario
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Eliminar transaccion
+    get:
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Transaccion'
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Obtener transaccion por id
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Campos a actualizar (parcial). Debe incluir caja_id en body o
+          query.
+        in: body
+        name: transaccion
+        schema:
+          $ref: '#/definitions/models.TransaccionUpdateInput'
+      - description: Usuario que actualiza la transacción
+        in: query
+        name: usuario
+        required: true
+        type: string
+      - description: ID de caja (obligatorio si no se envía en el body)
+        in: query
+        name: caja_id
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Transaccion'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Actualizar transaccion parcialmente
+swagger: "2.0"

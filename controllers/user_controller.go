@@ -103,7 +103,7 @@ func SyncUsers(c *gin.Context) {
 				Name:     emp.Name,
 				PIN:      pinStr,
 				Role:     role,
-				OdooID:   emp.ID,
+				OdooID:   &emp.ID,
 			}
 			DB.Create(&user)
 			count++

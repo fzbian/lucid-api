@@ -430,4 +430,5 @@ FodyWeavers.xsd
 .vscode/
 .DS_store
 .env
+prod.env
 uploads/*.pdf

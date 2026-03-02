@@ -12,7 +12,7 @@ type User struct {
 	Celular   string    `gorm:"size:20" json:"celular"`    // Número para envío de recibos/firma
 	PIN       string    `gorm:"size:200" json:"-"`         // PIN/Password (hashed or plain depending on Odoo sync, assumes Odoo PIN usage)
 	Role      string    `gorm:"size:50;default:'user'" json:"role"`
-	OdooID    int       `gorm:"uniqueIndex" json:"odoo_id"` // Link to hr.employee
+	OdooID    *int      `gorm:"uniqueIndex" json:"odoo_id"` // Link to hr.employee (NULL para usuarios locales)
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

@@ -81,6 +81,7 @@ func main() {
 
 	// Swagger UI en /swagger/index.html
 	r.Static("/uploads", "./uploads")
+	r.GET("/firma/:token", controllers.ServePaymentSigningPage)
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 
 	// endpoint health

@@ -27,6 +27,215 @@ const (
 	signatureAuditLabel = "token+cedula+drawn_signature"
 )
 
+const paymentSigningPageHTML = `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Firma de Comprobante</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f6f7fb;
+      color: #111827;
+    }
+    .wrap {
+      max-width: 640px;
+      margin: 32px auto;
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+    }
+    h1 { margin: 0 0 16px; font-size: 1.4rem; }
+    label { display: block; margin: 12px 0 6px; font-weight: 600; }
+    input, button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
+      font-size: 0.95rem;
+    }
+    button {
+      border: none;
+      background: #111827;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .card {
+      margin-top: 14px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .msg {
+      margin-top: 12px;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 0.92rem;
+    }
+    .ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .err { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .muted { color: #6b7280; font-size: 0.88rem; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>Firma de comprobante de nomina</h1>
+    <p class="muted">Ingresa tu cedula para validar el enlace y sube el PDF firmado.</p>
+
+    <label for="cedula">Cedula</label>
+    <input id="cedula" name="cedula" type="text" autocomplete="off" placeholder="Ej: 1234567890" />
+
+    <button id="validateBtn" type="button">Validar enlace</button>
+
+    <div id="paymentCard" class="card" style="display:none;"></div>
+
+    <form id="signForm" style="display:none;">
+      <label for="signedPdf">PDF firmado</label>
+      <input id="signedPdf" name="signed_pdf" type="file" accept="application/pdf,.pdf" />
+      <button id="submitBtn" type="submit">Confirmar firma</button>
+    </form>
+
+    <div id="message"></div>
+  </main>
+
+  <script>
+    (function () {
+      const token = decodeURIComponent((window.location.pathname.split("/").pop() || "").trim());
+      const cedulaInput = document.getElementById("cedula");
+      const validateBtn = document.getElementById("validateBtn");
+      const signForm = document.getElementById("signForm");
+      const signedPdfInput = document.getElementById("signedPdf");
+      const submitBtn = document.getElementById("submitBtn");
+      const paymentCard = document.getElementById("paymentCard");
+      const message = document.getElementById("message");
+
+      let isValidated = false;
+
+      function setMessage(text, isError) {
+        message.innerHTML = "";
+        if (!text) return;
+        const box = document.createElement("div");
+        box.className = "msg " + (isError ? "err" : "ok");
+        box.textContent = text;
+        message.appendChild(box);
+      }
+
+      function parseError(resp, fallback) {
+        return resp.json()
+          .then(data => (data && data.error) ? data.error : fallback)
+          .catch(() => fallback);
+      }
+
+      if (!token) {
+        setMessage("Token invalido.", true);
+        validateBtn.disabled = true;
+        return;
+      }
+
+      validateBtn.addEventListener("click", async function () {
+        const cedula = (cedulaInput.value || "").trim();
+        if (!cedula) {
+          setMessage("Debes ingresar la cedula.", true);
+          return;
+        }
+
+        validateBtn.disabled = true;
+        setMessage("Validando enlace...", false);
+        try {
+          const resp = await fetch("/api/nomina/sign/" + encodeURIComponent(token) + "/access", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cedula: cedula })
+          });
+
+          if (!resp.ok) {
+            const errText = await parseError(resp, "No se pudo validar el enlace.");
+            throw new Error(errText);
+          }
+
+          const data = await resp.json();
+          isValidated = true;
+          paymentCard.style.display = "block";
+          signForm.style.display = "block";
+
+          const p = data.payment || {};
+          const u = data.user || {};
+          paymentCard.innerHTML =
+            "<strong>Empleado:</strong> " + (u.full_name || u.name || "N/A") + "<br>" +
+            "<strong>Periodo:</strong> " + (p.period_start || "") + " - " + (p.period_end || "") + "<br>" +
+            "<strong>Total pagado:</strong> " + (p.total_paid || 0) + "<br>" +
+            "<strong>Vence:</strong> " + (data.expires_at || "");
+
+          setMessage("Enlace valido. Ahora sube el PDF firmado.", false);
+        } catch (err) {
+          isValidated = false;
+          signForm.style.display = "none";
+          paymentCard.style.display = "none";
+          setMessage(err.message || "No se pudo validar el enlace.", true);
+        } finally {
+          validateBtn.disabled = false;
+        }
+      });
+
+      signForm.addEventListener("submit", async function (ev) {
+        ev.preventDefault();
+        if (!isValidated) {
+          setMessage("Primero valida el enlace con tu cedula.", true);
+          return;
+        }
+
+        const cedula = (cedulaInput.value || "").trim();
+        const file = signedPdfInput.files && signedPdfInput.files[0];
+        if (!cedula) {
+          setMessage("Debes ingresar la cedula.", true);
+          return;
+        }
+        if (!file) {
+          setMessage("Debes seleccionar el PDF firmado.", true);
+          return;
+        }
+
+        submitBtn.disabled = true;
+        setMessage("Enviando firma...", false);
+
+        try {
+          const form = new FormData();
+          form.append("cedula", cedula);
+          form.append("signed_pdf", file);
+
+          const resp = await fetch("/api/nomina/sign/" + encodeURIComponent(token) + "/complete", {
+            method: "POST",
+            body: form
+          });
+
+          if (!resp.ok) {
+            const errText = await parseError(resp, "No se pudo confirmar la firma.");
+            throw new Error(errText);
+          }
+
+          setMessage("Firma confirmada correctamente.", false);
+          signForm.reset();
+          submitBtn.disabled = true;
+        } catch (err) {
+          setMessage(err.message || "No se pudo confirmar la firma.", true);
+          submitBtn.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
+`
+
 func normalizeCedula(v string) string {
 	replacer := strings.NewReplacer(".", "", "-", "", " ", "")
 	return replacer.Replace(strings.TrimSpace(strings.ToLower(v)))
@@ -62,6 +271,15 @@ func resolveRequestBaseURL(c *gin.Context) string {
 	}
 
 	return fmt.Sprintf("%s://%s", scheme, host)
+}
+
+// ServePaymentSigningPage renderiza una vista básica para firmar comprobantes por token.
+func ServePaymentSigningPage(c *gin.Context) {
+	if strings.TrimSpace(c.Param("token")) == "" {
+		c.String(http.StatusBadRequest, "Token requerido")
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(paymentSigningPageHTML))
 }
 
 func getSignaturePaymentByToken(token string) (*models.NominaPayment, error) {

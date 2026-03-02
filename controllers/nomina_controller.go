@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -239,6 +240,50 @@ const paymentSigningPageHTML = `<!doctype html>
 func normalizeCedula(v string) string {
 	replacer := strings.NewReplacer(".", "", "-", "", " ", "")
 	return replacer.Replace(strings.TrimSpace(strings.ToLower(v)))
+}
+
+type nominaAdjustment struct {
+	Label string  `json:"label"`
+	Value float64 `json:"value"`
+}
+
+func sumNominaAdjustments(raw string) (int64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	var items []nominaAdjustment
+	if err := json.Unmarshal([]byte(trimmed), &items); err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, item := range items {
+		total += int64(item.Value)
+	}
+	return total, nil
+}
+
+func resolveSundayValueByPeriod(global models.NominaConfig, periodStart time.Time) int64 {
+	month := int(periodStart.Month()) // 1..12
+	if month >= 1 && month <= 6 {
+		if global.ValorDominicalS1 > 0 {
+			return global.ValorDominicalS1
+		}
+		if global.ValorDominical > 0 {
+			return global.ValorDominical
+		}
+		return global.ValorDominicalS2
+	}
+
+	if global.ValorDominicalS2 > 0 {
+		return global.ValorDominicalS2
+	}
+	if global.ValorDominical > 0 {
+		return global.ValorDominical
+	}
+	return global.ValorDominicalS1
 }
 
 func hashSignatureToken(token string) string {
@@ -669,15 +714,28 @@ func GeneratePayment(c *gin.Context) {
 		pension = 0
 	}
 
-	// Dominicales
-	sundaysTotal := int64(input.SundaysQty) * global.ValorDominical
+	// Dominicales (S1/S2 según mes, con fallback al valor legacy)
+	sundayValue := resolveSundayValueByPeriod(global, input.PeriodStart)
+	sundaysTotal := int64(input.SundaysQty) * sundayValue
 
 	// Madrugones
 	madrugonesTotal := int64(input.MadrugonesQty * float64(global.ValorMadrugon))
 
+	// Ajustes manuales
+	aditionsTotal, err := sumNominaAdjustments(input.Aditions)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Formato inválido en aditions"})
+		return
+	}
+	deductionsTotal, err := sumNominaAdjustments(input.Deductions)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Formato inválido en deductions"})
+		return
+	}
+
 	// Total
-	// Base + Transporte + Dominicales + Madrugones + Comision - Salud - Pension - Adelantos
-	totalPaid := paidBase + transport + sundaysTotal + madrugonesTotal + input.Commission - health - pension - input.Advance
+	// Base + Transporte + Dominicales + Madrugones + Comisión + Adiciones - Salud - Pensión - Adelantos - Deducciones
+	totalPaid := paidBase + transport + sundaysTotal + madrugonesTotal + input.Commission + aditionsTotal - health - pension - input.Advance - deductionsTotal
 
 	// 4. Determinar si el pago debe ser parcial:
 	//    - Solo 2da quincena (día > 15) puede ser parcial

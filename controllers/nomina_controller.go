@@ -573,8 +573,9 @@ func UpdateEmployeeDetails(c *gin.Context) {
 	var input struct {
 		BaseSalary  *int64  `json:"base_salary"` // Pointer to check nil if not updating
 		DailyRate   *int64  `json:"daily_rate"`  // Valor por día (solo para pay_type=daily)
+		HourlyRate  *int64  `json:"hourly_rate"` // Valor por hora (solo para pay_type=madrugones)
 		HasSecurity *bool   `json:"has_security"`
-		PayType     *string `json:"pay_type"` // "fixed" or "daily"
+		PayType     *string `json:"pay_type"` // "fixed", "daily" o "madrugones"
 		FullName    *string `json:"full_name"`
 		Cedula      *string `json:"cedula"`
 		Celular     *string `json:"celular"`
@@ -584,8 +585,8 @@ func UpdateEmployeeDetails(c *gin.Context) {
 		return
 	}
 
-	// 1. Update Payroll Info (Base Salary, Daily Rate, Security & Pay Type)
-	if input.BaseSalary != nil || input.DailyRate != nil || input.HasSecurity != nil || input.PayType != nil {
+	// 1. Update Payroll Info (Base Salary, Daily/Hourly Rate, Security & Pay Type)
+	if input.BaseSalary != nil || input.DailyRate != nil || input.HourlyRate != nil || input.HasSecurity != nil || input.PayType != nil {
 		var p models.UserPayroll
 		if err := DB.First(&p, userID).Error; err != nil {
 			p.UserID = uint(userID)
@@ -595,6 +596,9 @@ func UpdateEmployeeDetails(c *gin.Context) {
 		}
 		if input.DailyRate != nil {
 			p.DailyRate = *input.DailyRate
+		}
+		if input.HourlyRate != nil {
+			p.HourlyRate = *input.HourlyRate
 		}
 		if input.HasSecurity != nil {
 			p.HasSecurity = input.HasSecurity
@@ -634,7 +638,8 @@ func GeneratePayment(c *gin.Context) {
 		UserID               uint      `json:"user_id" binding:"required"`
 		PeriodStart          time.Time `json:"period_start"`
 		PeriodEnd            time.Time `json:"period_end"`
-		DaysWorked           int       `json:"days_worked"` // Días trabajados (solo para pay_type=daily)
+		DaysWorked           int       `json:"days_worked"`  // Días trabajados (solo para pay_type=daily)
+		HoursWorked          float64   `json:"hours_worked"` // Horas trabajadas (solo para pay_type=madrugones)
 		SundaysQty           int       `json:"sundays_qty"`
 		MadrugonesQty        float64   `json:"madrugones_qty"`
 		Advance              int64     `json:"advance"`
@@ -677,16 +682,29 @@ func GeneratePayment(c *gin.Context) {
 		payType = "fixed"
 	}
 
+	daysWorkedSnapshot := input.DaysWorked
+	if daysWorkedSnapshot < 0 {
+		daysWorkedSnapshot = 0
+	}
+	hoursWorkedSnapshot := input.HoursWorked
+	if hoursWorkedSnapshot < 0 {
+		hoursWorkedSnapshot = 0
+	}
+
 	var paidBase int64
-	if payType == "daily" && input.DaysWorked > 0 {
-		// Pago por días: Valor por día * Días Trabajados
-		paidBase = payroll.DailyRate * int64(input.DaysWorked)
-	} else {
+	switch payType {
+	case "daily":
+		// Pago por días: Valor por día * Días trabajados
+		paidBase = payroll.DailyRate * int64(daysWorkedSnapshot)
+	case "madrugones":
+		// Pago por horas: Valor por hora * Horas trabajadas
+		paidBase = int64(hoursWorkedSnapshot * float64(payroll.HourlyRate))
+	default:
 		// Salario Fijo Quincenal = Base / 2
 		paidBase = payroll.BaseSalary / 2
 	}
 
-	// Auxilio Transporte Quincenal = Auxilio / 2 (solo para salario fijo)
+	// Auxilio Transporte Quincenal = Auxilio / 2 (aplica para fijo y madrugones; no aplica para daily)
 	var transport int64
 	includesTransportAid := payType != "daily"
 	if input.IncludesTransportAid != nil {
@@ -714,12 +732,27 @@ func GeneratePayment(c *gin.Context) {
 		pension = 0
 	}
 
-	// Dominicales (S1/S2 según mes, con fallback al valor legacy)
-	sundayValue := resolveSundayValueByPeriod(global, input.PeriodStart)
-	sundaysTotal := int64(input.SundaysQty) * sundayValue
+	sundaysQtySnapshot := 0
+	madrugonesQtySnapshot := float64(0)
+	var sundaysTotal int64
+	var madrugonesTotal int64
+	if payType == "fixed" {
+		sundaysQtySnapshot = input.SundaysQty
+		if sundaysQtySnapshot < 0 {
+			sundaysQtySnapshot = 0
+		}
+		madrugonesQtySnapshot = input.MadrugonesQty
+		if madrugonesQtySnapshot < 0 {
+			madrugonesQtySnapshot = 0
+		}
 
-	// Madrugones
-	madrugonesTotal := int64(input.MadrugonesQty * float64(global.ValorMadrugon))
+		// Dominicales (S1/S2 según mes, con fallback al valor legacy)
+		sundayValue := resolveSundayValueByPeriod(global, input.PeriodStart)
+		sundaysTotal = int64(sundaysQtySnapshot) * sundayValue
+
+		// Madrugones (recargos sobre salario fijo)
+		madrugonesTotal = int64(madrugonesQtySnapshot * float64(global.ValorMadrugon))
+	}
 
 	// Ajustes manuales
 	aditionsTotal, err := sumNominaAdjustments(input.Aditions)
@@ -762,13 +795,15 @@ func GeneratePayment(c *gin.Context) {
 		PeriodEnd:            input.PeriodEnd,
 		BaseSalary:           payroll.BaseSalary,
 		DailyRate:            payroll.DailyRate,
+		HourlyRate:           payroll.HourlyRate,
 		PayType:              payType,
-		DaysWorked:           input.DaysWorked,
+		DaysWorked:           daysWorkedSnapshot,
+		HoursWorked:          hoursWorkedSnapshot,
 		PaidBase:             paidBase,
 		TransportAid:         transport,
-		SundaysQty:           input.SundaysQty,
+		SundaysQty:           sundaysQtySnapshot,
 		SundaysTotal:         sundaysTotal,
-		MadrugonesQty:        input.MadrugonesQty,
+		MadrugonesQty:        madrugonesQtySnapshot,
 		MadrugonesTotal:      madrugonesTotal,
 		IncludesTransportAid: includesTransportAid,
 		IncludesSecurity:     input.IncludesSecurity,

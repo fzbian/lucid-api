@@ -25,8 +25,9 @@ type UserPayroll struct {
 	UserID      uint      `gorm:"primaryKey" json:"user_id"`
 	BaseSalary  int64     `json:"base_salary"`                   // Salario base mensual (usado cuando pay_type=fixed)
 	DailyRate   int64     `json:"daily_rate"`                    // Valor por día (usado cuando pay_type=daily)
+	HourlyRate  int64     `json:"hourly_rate"`                   // Valor por hora (usado cuando pay_type=madrugones)
 	HasSecurity *bool     `json:"has_security"`                  // Si paga seguridad social
-	PayType     string    `gorm:"default:fixed" json:"pay_type"` // "fixed" = salario fijo, "daily" = pago por días trabajados
+	PayType     string    `gorm:"default:fixed" json:"pay_type"` // "fixed" = salario fijo, "daily" = pago por días, "madrugones" = pago por horas
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
@@ -43,8 +44,10 @@ type NominaPayment struct {
 	// Valores calculados y guardados
 	BaseSalary      int64   `json:"base_salary"`   // Salario base (mensual) snapshot
 	DailyRate       int64   `json:"daily_rate"`    // Valor por día snapshot (solo para pay_type=daily)
-	PayType         string  `json:"pay_type"`      // "fixed" o "daily" snapshot
+	HourlyRate      int64   `json:"hourly_rate"`   // Valor por hora snapshot (solo para pay_type=madrugones)
+	PayType         string  `json:"pay_type"`      // "fixed", "daily" o "madrugones" snapshot
 	DaysWorked      int     `json:"days_worked"`   // Días trabajados (solo para pay_type=daily)
+	HoursWorked     float64 `json:"hours_worked"`  // Horas trabajadas (solo para pay_type=madrugones)
 	PaidBase        int64   `json:"paid_base"`     // (Base / 2) o (DailyRate * days)
 	TransportAid    int64   `json:"transport_aid"` // (Auxilio / 2)
 	SundaysQty      int     `json:"sundays_qty"`

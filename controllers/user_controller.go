@@ -160,9 +160,10 @@ func CreateUser(c *gin.Context) {
 		Celular    string `json:"celular"`
 		PIN        string `json:"pin"`
 		Role       string `json:"role"`
-		PayType    string `json:"pay_type"`    // "fixed" or "daily" (optional)
+		PayType    string `json:"pay_type"`    // "fixed", "daily" o "madrugones" (optional)
 		BaseSalary int64  `json:"base_salary"` // optional
 		DailyRate  int64  `json:"daily_rate"`  // optional
+		HourlyRate int64  `json:"hourly_rate"` // optional
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -192,12 +193,13 @@ func CreateUser(c *gin.Context) {
 	}
 
 	// Crear UserPayroll si se especificó pay_type
-	if body.PayType == "daily" || body.PayType == "fixed" {
+	if body.PayType == "daily" || body.PayType == "fixed" || body.PayType == "madrugones" {
 		payroll := models.UserPayroll{
 			UserID:     u.ID,
 			PayType:    body.PayType,
 			BaseSalary: body.BaseSalary,
 			DailyRate:  body.DailyRate,
+			HourlyRate: body.HourlyRate,
 		}
 		DB.Create(&payroll)
 	}

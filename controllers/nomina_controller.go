@@ -1221,10 +1221,18 @@ func UpdatePaymentCommission(c *gin.Context) {
 	id := c.Param("id")
 
 	var input struct {
-		Commission int64 `json:"commission" binding:"required"`
+		Commission *int64 `json:"commission"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if input.Commission == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "commission es requerido"})
+		return
+	}
+	if *input.Commission < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "commission no puede ser negativo"})
 		return
 	}
 
@@ -1240,8 +1248,8 @@ func UpdatePaymentCommission(c *gin.Context) {
 	}
 
 	// Agregar comisión al total existente
-	payment.Commission = input.Commission
-	payment.TotalPaid = payment.TotalPaid + input.Commission
+	payment.Commission = *input.Commission
+	payment.TotalPaid = payment.TotalPaid + *input.Commission
 	payment.IsPartial = false
 
 	if err := DB.Save(&payment).Error; err != nil {

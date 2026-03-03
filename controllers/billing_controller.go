@@ -56,30 +56,94 @@ func SaveBillingMonthly(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave)})
 }
 
-// cleanOrphanAssignments elimina BillingNominaAssignment records cuyos payment_id ya no existen.
-// Retorna los IDs eliminados. Recibe las asignaciones y un mapa de paymentIDs válidos.
-func cleanOrphanAssignments(assignments []models.BillingNominaAssignment, validPaymentIDs map[uint]bool) []uint {
-	var staleIDs []uint
-	for _, a := range assignments {
-		if !validPaymentIDs[a.PaymentID] {
-			staleIDs = append(staleIDs, a.ID)
+func resolveFortnightSlot(payment models.NominaPayment) int {
+	startUTC := payment.PeriodStart.UTC()
+	endUTC := payment.PeriodEnd.UTC()
+
+	if startUTC.Day() > 15 {
+		return 2
+	}
+	// Si cruza mes o el fin del periodo supera el día 15, trátalo como 2da quincena.
+	if startUTC.Month() != endUTC.Month() || endUTC.Day() > 15 {
+		return 2
+	}
+	return 1
+}
+
+func pickCanonicalMonthlyPayments(payments []models.NominaPayment) []models.NominaPayment {
+	type userFortnightKey struct {
+		UserID uint
+		Year   int
+		Month  int
+		Slot   int
+	}
+
+	chosen := make(map[userFortnightKey]models.NominaPayment)
+	for _, p := range payments {
+		startUTC := p.PeriodStart.UTC()
+		key := userFortnightKey{
+			UserID: p.UserID,
+			Year:   startUTC.Year(),
+			Month:  int(startUTC.Month()),
+			Slot:   resolveFortnightSlot(p),
+		}
+
+		current, exists := chosen[key]
+		if !exists {
+			chosen[key] = p
+			continue
+		}
+
+		if p.CreatedAt.After(current.CreatedAt) || (p.CreatedAt.Equal(current.CreatedAt) && p.ID > current.ID) {
+			chosen[key] = p
 		}
 	}
+
+	result := make([]models.NominaPayment, 0, len(chosen))
+	for _, p := range chosen {
+		result = append(result, p)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].UserID != result[j].UserID {
+			return result[i].UserID < result[j].UserID
+		}
+		slotI := resolveFortnightSlot(result[i])
+		slotJ := resolveFortnightSlot(result[j])
+		if slotI != slotJ {
+			return slotI < slotJ
+		}
+		return result[i].ID < result[j].ID
+	})
+
+	return result
+}
+
+func paymentIDSet(payments []models.NominaPayment) map[uint]bool {
+	result := make(map[uint]bool, len(payments))
+	for _, p := range payments {
+		result[p.ID] = true
+	}
+	return result
+}
+
+func cleanAssignmentsOutsidePaymentSet(assignments []models.BillingNominaAssignment, allowedPaymentIDs map[uint]bool) []models.BillingNominaAssignment {
+	staleIDs := make([]uint, 0)
+	filtered := make([]models.BillingNominaAssignment, 0, len(assignments))
+
+	for _, a := range assignments {
+		if !allowedPaymentIDs[a.PaymentID] {
+			staleIDs = append(staleIDs, a.ID)
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+
 	if len(staleIDs) > 0 {
 		DB.Where("id IN ?", staleIDs).Delete(&models.BillingNominaAssignment{})
 	}
-	return staleIDs
-}
 
-// filterValidAssignments retorna solo las asignaciones cuyos payment_id existen en validIDs
-func filterValidAssignments(assignments []models.BillingNominaAssignment, validIDs map[uint]bool) []models.BillingNominaAssignment {
-	result := make([]models.BillingNominaAssignment, 0, len(assignments))
-	for _, a := range assignments {
-		if validIDs[a.PaymentID] {
-			result = append(result, a)
-		}
-	}
-	return result
+	return filtered
 }
 
 // isPOSIncludedInReports define si un POS debe incluirse en informes.
@@ -253,21 +317,19 @@ func getNominaPerPOS(year, month int) map[string]float64 {
 		return make(map[string]float64)
 	}
 
-	paymentIDs := make([]uint, 0, len(assignments))
-	for _, a := range assignments {
-		paymentIDs = append(paymentIDs, a.PaymentID)
-	}
-
+	start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, 0)
 	var payments []models.NominaPayment
-	DB.Where("id IN ?", paymentIDs).Find(&payments)
-	validIDs := make(map[uint]bool)
+	DB.Where("period_start >= ? AND period_start < ?", start, end).Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
+
+	validIDs := paymentIDSet(payments)
 	paymentPaid := make(map[uint]int64)
 	for _, p := range payments {
-		validIDs[p.ID] = true
 		paymentPaid[p.ID] = p.TotalPaid
 	}
 
-	cleanOrphanAssignments(assignments, validIDs)
+	assignments = cleanAssignmentsOutsidePaymentSet(assignments, validIDs)
 
 	result := make(map[string]float64)
 	for _, a := range assignments {
@@ -291,29 +353,20 @@ func getNominaPerPOSBulk(year int) map[int]map[string]float64 {
 		return result
 	}
 
-	// Recolectar payment IDs
-	paymentIDSet := make(map[uint]bool)
-	for _, a := range assignments {
-		paymentIDSet[a.PaymentID] = true
-	}
-	paymentIDs := make([]uint, 0, len(paymentIDSet))
-	for id := range paymentIDSet {
-		paymentIDs = append(paymentIDs, id)
-	}
-
-	// 1 query: todos los pagos referenciados
+	// 1 query: todos los pagos del año y normalización a máximo 2 quincenas por empleado/mes
+	start := time.Date(year, time.January, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(year+1, time.January, 1, 0, 0, 0, 0, time.UTC)
 	var payments []models.NominaPayment
-	DB.Where("id IN ?", paymentIDs).Find(&payments)
+	DB.Where("period_start >= ? AND period_start < ?", start, end).Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
+
 	paymentMap := make(map[uint]int64)
 	for _, p := range payments {
 		paymentMap[p.ID] = p.TotalPaid
 	}
 
-	validIDs := make(map[uint]bool)
-	for id := range paymentMap {
-		validIDs[id] = true
-	}
-	cleanOrphanAssignments(assignments, validIDs)
+	validIDs := paymentIDSet(payments)
+	assignments = cleanAssignmentsOutsidePaymentSet(assignments, validIDs)
 
 	// Agrupar por mes + POS
 	for _, a := range assignments {
@@ -350,25 +403,19 @@ func GetNominaByPOS(c *gin.Context) {
 		return
 	}
 
-	// Recolectar payment IDs
-	paymentIDs := make([]uint, 0, len(assignments))
-	for _, a := range assignments {
-		paymentIDs = append(paymentIDs, a.PaymentID)
-	}
-
+	start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, 0)
 	var payments []models.NominaPayment
-	DB.Preload("User").Where("id IN ?", paymentIDs).Find(&payments)
+	DB.Preload("User").Where("period_start >= ? AND period_start < ?", start, end).Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
+
 	paymentMap := make(map[uint]models.NominaPayment)
 	for _, p := range payments {
 		paymentMap[p.ID] = p
 	}
 
-	validIDs := make(map[uint]bool)
-	for id := range paymentMap {
-		validIDs[id] = true
-	}
-	cleanOrphanAssignments(assignments, validIDs)
-	assignments = filterValidAssignments(assignments, validIDs)
+	validIDs := paymentIDSet(payments)
+	assignments = cleanAssignmentsOutsidePaymentSet(assignments, validIDs)
 
 	type employeeEntry struct {
 		UserID    uint   `json:"user_id"`
@@ -459,31 +506,17 @@ func GetAvailableNominaPayments(c *gin.Context) {
 	DB.Preload("User").
 		Where("period_start >= ? AND period_start < ?", start, end).
 		Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
+	validPaymentIDs := paymentIDSet(payments)
 
-	// Obtener pagos ya asignados este mes, verificando que los pagos referenciados existan
+	// Obtener pagos ya asignados este mes y limpiar asignaciones fuera del set canónico
 	var assigned []models.BillingNominaAssignment
 	DB.Where("year = ? AND month = ?", year, month).Find(&assigned)
-
-	// Verificar que los payment IDs referenciados aún existen y limpiar huérfanos
-	validPaymentIDs := make(map[uint]bool)
-	if len(assigned) > 0 {
-		assignedPaymentIDs := make([]uint, 0, len(assigned))
-		for _, a := range assigned {
-			assignedPaymentIDs = append(assignedPaymentIDs, a.PaymentID)
-		}
-		var existingPayments []models.NominaPayment
-		DB.Select("id").Where("id IN ?", assignedPaymentIDs).Find(&existingPayments)
-		for _, p := range existingPayments {
-			validPaymentIDs[p.ID] = true
-		}
-		cleanOrphanAssignments(assigned, validPaymentIDs)
-	}
+	assigned = cleanAssignmentsOutsidePaymentSet(assigned, validPaymentIDs)
 
 	assignedUserIDs := make(map[uint]string) // user_id -> pos_name
 	for _, a := range assigned {
-		if validPaymentIDs[a.PaymentID] {
-			assignedUserIDs[a.UserID] = a.PosName
-		}
+		assignedUserIDs[a.UserID] = a.PosName
 	}
 
 	// Agrupar por user_id: sumar total_paid de todas las quincenas
@@ -569,6 +602,7 @@ func AssignNominaToPOS(c *gin.Context) {
 	end := start.AddDate(0, 1, 0)
 	var payments []models.NominaPayment
 	DB.Where("user_id = ? AND period_start >= ? AND period_start < ?", input.UserID, start, end).Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
 
 	if len(payments) == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No hay pagos de nómina para este empleado en este mes"})
@@ -1523,6 +1557,7 @@ func GetNominaSummary(c *gin.Context) {
 	DB.Preload("User").
 		Where("period_start >= ? AND period_start < ?", start, end).
 		Find(&payments)
+	payments = pickCanonicalMonthlyPayments(payments)
 
 	type userAgg struct {
 		UserID    uint
@@ -1561,9 +1596,8 @@ func GetNominaSummary(c *gin.Context) {
 	var assignments []models.BillingNominaAssignment
 	DB.Where("year = ? AND month = ?", year, month).Find(&assignments)
 
-	// 3. Limpiar huérfanos y conservar sólo asignaciones válidas
-	cleanOrphanAssignments(assignments, validPaymentIDs)
-	assignments = filterValidAssignments(assignments, validPaymentIDs)
+	// 3. Limpiar asignaciones fuera del set canónico de pagos válidos
+	assignments = cleanAssignmentsOutsidePaymentSet(assignments, validPaymentIDs)
 
 	// 4. Construir by_pos agrupado por empleado (total mensual por local)
 	type employeeEntry struct {

@@ -111,6 +111,7 @@ func Connect() (*gorm.DB, error) {
 			&models.BillingMonthly{},
 			&models.BillingConfig{},
 			&models.BillingFixedCost{},
+			&models.BillingGastoExclusion{},
 			&models.EmployeePOSAssignment{},
 			&models.BillingNominaAssignment{},
 		); err != nil {

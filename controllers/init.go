@@ -94,6 +94,7 @@ func RegisterBillingRoutes(rg *gin.RouterGroup) {
 		r.GET("/gastos", GetBillingGastos)
 		r.GET("/gastos-batch", GetBillingGastosBatch)
 		r.POST("/gastos", CreateBillingGasto)
+		r.POST("/gastos/exclude", ExcludeBillingGasto)
 		r.GET("/configs", GetBillingConfigs)
 		r.POST("/configs", SaveBillingConfigs)
 		r.GET("/fixed-costs", GetFixedCosts)

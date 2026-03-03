@@ -123,21 +123,57 @@ func billingExpenseFingerprint(fecha time.Time, monto float64, motivo, usuario s
 	)
 }
 
+func billingExcludedExpenseKey(local, fingerprint string) string {
+	return fmt.Sprintf("%s|%s",
+		strings.ToLower(normalizeBillingPOSName(local)),
+		strings.ToLower(strings.TrimSpace(fingerprint)),
+	)
+}
+
+func loadBillingExclusionSet(year, month int) (map[string]struct{}, error) {
+	var rows []models.BillingGastoExclusion
+	if err := DB.Where("year = ? AND month = ?", year, month).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		key := billingExcludedExpenseKey(row.Local, row.Fingerprint)
+		result[key] = struct{}{}
+	}
+	return result, nil
+}
+
 // getCommonExpensesBetween construye gastos variables combinando:
 // 1) gastos_locales existentes
 // 2) transacciones de movements marcadas como gastos operativos, asignadas por defecto a Bodega
 // evitando duplicados cuando ya existe un gasto_local equivalente.
 func getCommonExpensesBetween(start, end time.Time) ([]models.GastoLocal, error) {
-	var gastos []models.GastoLocal
-	if err := DB.Where("fecha >= ? AND fecha < ?", start, end).
-		Order("local asc, fecha asc").
-		Find(&gastos).Error; err != nil {
+	year := start.Year()
+	month := int(start.Month())
+
+	excludedSet, err := loadBillingExclusionSet(year, month)
+	if err != nil {
 		return nil, err
 	}
 
-	fingerprints := make(map[string]struct{}, len(gastos))
-	for _, g := range gastos {
-		fingerprints[billingExpenseFingerprint(g.Fecha, g.Monto, g.Motivo, g.Usuario)] = struct{}{}
+	var sourceGastos []models.GastoLocal
+	if err := DB.Where("fecha >= ? AND fecha < ?", start, end).
+		Order("local asc, fecha asc").
+		Find(&sourceGastos).Error; err != nil {
+		return nil, err
+	}
+
+	gastos := make([]models.GastoLocal, 0, len(sourceGastos))
+	fingerprints := make(map[string]struct{}, len(sourceGastos))
+	for _, g := range sourceGastos {
+		fp := billingExpenseFingerprint(g.Fecha, g.Monto, g.Motivo, g.Usuario)
+		excludedKey := billingExcludedExpenseKey(g.Local, fp)
+		if _, excluded := excludedSet[excludedKey]; excluded {
+			continue
+		}
+		gastos = append(gastos, g)
+		fingerprints[fp] = struct{}{}
 	}
 
 	var movementGastos []movementGastoEntry
@@ -153,6 +189,10 @@ func getCommonExpensesBetween(start, end time.Time) ([]models.GastoLocal, error)
 
 	for _, mg := range movementGastos {
 		key := billingExpenseFingerprint(mg.Fecha, mg.Monto, mg.Motivo, mg.Usuario)
+		excludedKey := billingExcludedExpenseKey("Bodega", key)
+		if _, excluded := excludedSet[excludedKey]; excluded {
+			continue
+		}
 		if _, exists := fingerprints[key]; exists {
 			continue
 		}
@@ -1347,6 +1387,72 @@ func CreateBillingGasto(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gasto)
+}
+
+// ExcludeBillingGasto marca un gasto como excluido del informe mensual (sin borrarlo físicamente).
+func ExcludeBillingGasto(c *gin.Context) {
+	var body struct {
+		Pos   string `json:"pos" binding:"required"`
+		Year  int    `json:"year" binding:"required"`
+		Month int    `json:"month" binding:"required,min=1,max=12"`
+		Gasto struct {
+			ID      *int32    `json:"id"`
+			Local   string    `json:"local"`
+			Tipo    string    `json:"tipo"`
+			Motivo  string    `json:"motivo" binding:"required"`
+			Monto   float64   `json:"monto" binding:"required"`
+			Fecha   time.Time `json:"fecha" binding:"required"`
+			Usuario string    `json:"usuario"`
+		} `json:"gasto" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	local := normalizeBillingPOSName(body.Pos)
+	if local == "" {
+		local = normalizeBillingPOSName(body.Gasto.Local)
+	}
+	if local == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pos inválido"})
+		return
+	}
+
+	fingerprint := billingExpenseFingerprint(body.Gasto.Fecha, body.Gasto.Monto, body.Gasto.Motivo, body.Gasto.Usuario)
+	if strings.TrimSpace(fingerprint) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "gasto inválido"})
+		return
+	}
+
+	var gastoLocalID *int32
+	if body.Gasto.ID != nil && *body.Gasto.ID > 0 {
+		gastoLocalID = body.Gasto.ID
+	}
+
+	exclusion := models.BillingGastoExclusion{
+		Year:         body.Year,
+		Month:        body.Month,
+		Local:        local,
+		Fingerprint:  fingerprint,
+		Source:       strings.TrimSpace(body.Gasto.Tipo),
+		GastoLocalID: gastoLocalID,
+	}
+
+	if err := DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "year"},
+			{Name: "month"},
+			{Name: "local"},
+			{Name: "fingerprint"},
+		},
+		DoNothing: true,
+	}).Create(&exclusion).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo excluir el gasto", "detalle": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "excluded"})
 }
 
 // ClearOdooCache limpia todo el cache de Odoo (admin only)

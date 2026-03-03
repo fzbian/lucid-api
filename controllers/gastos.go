@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,7 +133,12 @@ func GetGastos(c *gin.Context) {
 
 // DeleteGasto elimina un gasto local por ID
 func DeleteGasto(c *gin.Context) {
-	id := c.Param("id")
+	idRaw := strings.TrimSpace(c.Param("id"))
+	id, err := strconv.ParseInt(idRaw, 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id de gasto inválido"})
+		return
+	}
 	// Soft delete or hard delete? models.GastoLocal doesn't seem to have DeletedAt (gorm.Model).
 	// Let's check model definition in database.go? No, I saw models/gasto.go in step 3639.
 	// It has ID, Local, Fecha... No gorm.Model.

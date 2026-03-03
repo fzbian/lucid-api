@@ -161,6 +161,7 @@ func RegisterNominaRoutes(rg *gin.RouterGroup) {
 		r.DELETE("/payments/:id", DeleteNominaPayment)
 		r.PATCH("/payments/:id/commission", UpdatePaymentCommission)
 		r.GET("/history", GetNominaHistory)
+		r.POST("/period-inclusion", SetNominaPeriodInclusion)
 
 		// POS Assignments
 		r.GET("/employees/:id/pos-assignments", GetEmployeePOSAssignments)

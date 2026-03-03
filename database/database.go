@@ -108,6 +108,7 @@ func Connect() (*gorm.DB, error) {
 			&models.NominaConfig{},
 			&models.UserPayroll{},
 			&models.NominaPayment{},
+			&models.NominaPeriodExclusion{},
 			&models.BillingMonthly{},
 			&models.BillingConfig{},
 			&models.BillingFixedCost{},

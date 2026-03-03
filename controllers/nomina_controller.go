@@ -423,6 +423,30 @@ func normalizeWhatsAppNumber(raw string) string {
 	return normalized
 }
 
+func resolvePayrollFortnight(periodStart, periodEnd time.Time) int {
+	startUTC := periodStart.UTC()
+	endUTC := periodEnd.UTC()
+
+	if startUTC.Day() > 15 {
+		return 2
+	}
+	// Si cruza de mes o termina después del 15, se considera 2da quincena.
+	if startUTC.Month() != endUTC.Month() || endUTC.Day() > 15 {
+		return 2
+	}
+	return 1
+}
+
+func isUserExcludedFromNominaPeriod(year, month, period int, userID uint) (bool, error) {
+	var count int64
+	if err := DB.Model(&models.NominaPeriodExclusion{}).
+		Where("year = ? AND month = ? AND period = ? AND user_id = ?", year, month, period, userID).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func buildSignatureWhatsAppMessage(employeeName, signingURL string, expiresAt *time.Time) string {
 	name := strings.TrimSpace(employeeName)
 	if name == "" {
@@ -702,6 +726,30 @@ func GeneratePayment(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if input.PeriodStart.IsZero() || input.PeriodEnd.IsZero() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Periodo inválido"})
+		return
+	}
+	if input.PeriodStart.After(input.PeriodEnd) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Periodo inválido: fecha inicial mayor a fecha final"})
+		return
+	}
+
+	periodStartUTC := input.PeriodStart.UTC()
+	periodEndUTC := input.PeriodEnd.UTC()
+	periodNum := resolvePayrollFortnight(periodStartUTC, periodEndUTC)
+	periodYear := periodStartUTC.Year()
+	periodMonth := int(periodStartUTC.Month())
+
+	excluded, err := isUserExcludedFromNominaPeriod(periodYear, periodMonth, periodNum, input.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo validar la inclusión del empleado"})
+		return
+	}
+	if excluded {
+		c.JSON(http.StatusConflict, gin.H{"error": "El empleado está excluido de esta quincena"})
+		return
+	}
 
 	// 1. Obtener Config Global
 	var global models.NominaConfig
@@ -822,7 +870,7 @@ func GeneratePayment(c *gin.Context) {
 	//    - Primera quincena SIEMPRE se completa de inmediato
 	//    - Sin comisión asignada SIEMPRE se completa de inmediato
 	isPartial := false
-	is2ndFortnight := input.PeriodStart.Day() > 15
+	is2ndFortnight := periodNum == 2
 	if is2ndFortnight {
 		// Verificar si el empleado tiene comisión asignada en algún POS
 		var hasCommission int64
@@ -1214,6 +1262,58 @@ func GetNominaHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, history)
 }
 
+// SetNominaPeriodInclusion incluye/excluye un empleado de una quincena específica.
+func SetNominaPeriodInclusion(c *gin.Context) {
+	var input struct {
+		Year     int   `json:"year" binding:"required"`
+		Month    int   `json:"month" binding:"required,min=1,max=12"`
+		Period   int   `json:"period" binding:"required,oneof=1 2"`
+		UserID   uint  `json:"user_id" binding:"required"`
+		Included *bool `json:"included"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if input.Included == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "included es requerido"})
+		return
+	}
+
+	if *input.Included {
+		// Incluir: eliminar exclusión explícita si existe.
+		if err := DB.Where("year = ? AND month = ? AND period = ? AND user_id = ?", input.Year, input.Month, input.Period, input.UserID).
+			Delete(&models.NominaPeriodExclusion{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo actualizar la inclusión"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "included": true})
+		return
+	}
+
+	// Excluir: crear exclusión si no existe.
+	exclusion := models.NominaPeriodExclusion{
+		Year:   input.Year,
+		Month:  input.Month,
+		Period: input.Period,
+		UserID: input.UserID,
+	}
+
+	var existing models.NominaPeriodExclusion
+	if err := DB.Where("year = ? AND month = ? AND period = ? AND user_id = ?", input.Year, input.Month, input.Period, input.UserID).
+		First(&existing).Error; err == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "included": false})
+		return
+	}
+
+	if err := DB.Create(&exclusion).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo actualizar la inclusión"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "included": false})
+}
+
 // --- PARTIAL PAYMENT COMMISSION ---
 
 // UpdatePaymentCommission agrega comisión a un pago parcial y recalcula el total
@@ -1264,9 +1364,10 @@ func UpdatePaymentCommission(c *gin.Context) {
 
 // NominaMatrixDTO estructura de respuesta para la matriz
 type NominaMatrixDTO struct {
-	Users    interface{}              `json:"users"` // []EmployeePayrollDTO
-	Payments []models.NominaPayment   `json:"payments"`
-	Stats    map[string]map[int]int64 `json:"stats"` // [month][period] -> total_paid
+	Users            interface{}                    `json:"users"` // []EmployeePayrollDTO
+	Payments         []models.NominaPayment         `json:"payments"`
+	Stats            map[string]map[int]int64       `json:"stats"` // [month][period] -> total_paid
+	PeriodExclusions []models.NominaPeriodExclusion `json:"period_exclusions"`
 }
 
 // GetNominaMatrix retorna datos para el grid anual de pagos
@@ -1318,17 +1419,19 @@ func GetNominaMatrix(c *gin.Context) {
 		return
 	}
 
+	var periodExclusions []models.NominaPeriodExclusion
+	if err := DB.Where("year = ?", year).Find(&periodExclusions).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error cargando exclusiones de quincena"})
+		return
+	}
+
 	// 3. Generar estadísticas simples para el grid (Frontend puede calcular detalle)
 	// Pero ayudamos con totales por quincena
 	stats := make(map[string]map[int]int64)
 
 	for _, p := range payments {
 		month := p.PeriodStart.Month().String() // "January", etc
-		day := p.PeriodStart.Day()
-		period := 1
-		if day > 15 {
-			period = 2
-		}
+		period := resolvePayrollFortnight(p.PeriodStart, p.PeriodEnd)
 
 		if stats[month] == nil {
 			stats[month] = make(map[int]int64)
@@ -1337,8 +1440,9 @@ func GetNominaMatrix(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, NominaMatrixDTO{
-		Users:    userDTOs,
-		Payments: payments,
-		Stats:    stats,
+		Users:            userDTOs,
+		Payments:         payments,
+		Stats:            stats,
+		PeriodExclusions: periodExclusions,
 	})
 }

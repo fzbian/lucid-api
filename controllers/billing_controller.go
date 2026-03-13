@@ -146,6 +146,17 @@ func cleanAssignmentsOutsidePaymentSet(assignments []models.BillingNominaAssignm
 	return filtered
 }
 
+// billingNominaAmount reconstruye el valor que debe impactar los informes:
+// se parte del neto pagado y se revierten las deducciones aplicadas al empleado.
+func billingNominaAmount(payment models.NominaPayment) int64 {
+	deductionsTotal, err := sumNominaAdjustments(payment.Deductions)
+	if err != nil {
+		deductionsTotal = 0
+	}
+
+	return payment.TotalPaid + payment.Health + payment.Pension + payment.Advance + deductionsTotal
+}
+
 // isPOSIncludedInReports define si un POS debe incluirse en informes.
 // Si no existe configuración explícita, se considera incluido por defecto.
 func isPOSIncludedInReports(cfgMap map[string]models.BillingConfig, pos string) bool {
@@ -326,7 +337,7 @@ func getNominaPerPOS(year, month int) map[string]float64 {
 	validIDs := paymentIDSet(payments)
 	paymentPaid := make(map[uint]int64)
 	for _, p := range payments {
-		paymentPaid[p.ID] = p.TotalPaid
+		paymentPaid[p.ID] = billingNominaAmount(p)
 	}
 
 	assignments = cleanAssignmentsOutsidePaymentSet(assignments, validIDs)
@@ -362,7 +373,7 @@ func getNominaPerPOSBulk(year int) map[int]map[string]float64 {
 
 	paymentMap := make(map[uint]int64)
 	for _, p := range payments {
-		paymentMap[p.ID] = p.TotalPaid
+		paymentMap[p.ID] = billingNominaAmount(p)
 	}
 
 	validIDs := paymentIDSet(payments)
@@ -441,6 +452,7 @@ func GetNominaByPOS(c *gin.Context) {
 		if !found {
 			continue
 		}
+		billingAmount := billingNominaAmount(p)
 		key := posUserKey{a.PosName, a.UserID}
 		emp, exists := empAgg[key]
 		if !exists {
@@ -457,13 +469,13 @@ func GetNominaByPOS(c *gin.Context) {
 			}
 			empAgg[key] = emp
 		}
-		emp.TotalPaid += p.TotalPaid
+		emp.TotalPaid += billingAmount
 		emp.Count++
 
 		if posAgg[a.PosName] == nil {
 			posAgg[a.PosName] = &posNomina{}
 		}
-		posAgg[a.PosName].Total += p.TotalPaid
+		posAgg[a.PosName].Total += billingAmount
 	}
 
 	result := make(map[string]posNomina)
@@ -519,7 +531,7 @@ func GetAvailableNominaPayments(c *gin.Context) {
 		assignedUserIDs[a.UserID] = a.PosName
 	}
 
-	// Agrupar por user_id: sumar total_paid de todas las quincenas
+	// Agrupar por user_id: sumar el valor de informe de todas las quincenas
 	type employeeAgg struct {
 		UserID     uint
 		Name       string
@@ -530,6 +542,7 @@ func GetAvailableNominaPayments(c *gin.Context) {
 	aggMap := make(map[uint]*employeeAgg)
 	for _, p := range payments {
 		agg, exists := aggMap[p.UserID]
+		billingAmount := billingNominaAmount(p)
 		if !exists {
 			name := p.User.Name
 			if name == "" {
@@ -544,7 +557,7 @@ func GetAvailableNominaPayments(c *gin.Context) {
 			}
 			aggMap[p.UserID] = agg
 		}
-		agg.TotalPaid += p.TotalPaid
+		agg.TotalPaid += billingAmount
 		agg.PaymentIDs = append(agg.PaymentIDs, p.ID)
 		agg.Count++
 	}
@@ -1572,6 +1585,7 @@ func GetNominaSummary(c *gin.Context) {
 	for _, p := range payments {
 		paymentByID[p.ID] = p
 		validPaymentIDs[p.ID] = true
+		billingAmount := billingNominaAmount(p)
 
 		agg, exists := userMonthlyAgg[p.UserID]
 		if !exists {
@@ -1588,7 +1602,7 @@ func GetNominaSummary(c *gin.Context) {
 			}
 			userMonthlyAgg[p.UserID] = agg
 		}
-		agg.TotalPaid += p.TotalPaid
+		agg.TotalPaid += billingAmount
 		agg.Count++
 	}
 
@@ -1624,11 +1638,12 @@ func GetNominaSummary(c *gin.Context) {
 		if !found {
 			continue
 		}
+		billingAmount := billingNominaAmount(p)
 		assignedUsers[a.UserID] = a.PosName
 		if byPos[a.PosName] == nil {
 			byPos[a.PosName] = &posNomina{Employees: []employeeEntry{}}
 		}
-		byPos[a.PosName].Total += p.TotalPaid
+		byPos[a.PosName].Total += billingAmount
 
 		key := posUserKey{PosName: a.PosName, UserID: a.UserID}
 		empAgg, exists := employeeAggByPos[key]
@@ -1646,7 +1661,7 @@ func GetNominaSummary(c *gin.Context) {
 			}
 			employeeAggByPos[key] = empAgg
 		}
-		empAgg.TotalPaid += p.TotalPaid
+		empAgg.TotalPaid += billingAmount
 		empAgg.Count++
 	}
 

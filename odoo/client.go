@@ -133,28 +133,8 @@ func (c *Client) callOdoo(model, method string, args []interface{}, kwargs map[s
 	return r.Result, nil
 }
 
-// Construye un dominio OR para nombres que comienzan por prefijos (name ilike 'Prefijo%')
-func buildNamePrefixDomain(prefixes []string) []interface{} {
-	var domain []interface{}
-	// Para n prefijos se necesitan n-1 '|' al inicio encadenando OR
-	if len(prefixes) == 0 {
-		return []interface{}{}
-	}
-	if len(prefixes) == 1 {
-		return []interface{}{[]interface{}{"name", "ilike", prefixes[0] + "%"}}
-	}
-	// Ejemplo para 3 prefijos: '|','|', cond1, cond2, cond3
-	for i := 0; i < len(prefixes)-1; i++ {
-		domain = append(domain, "|")
-	}
-	for _, p := range prefixes {
-		domain = append(domain, []interface{}{"name", "ilike", p + "%"})
-	}
-	return domain
-}
-
 // FetchPOSBalances optimizado con cache TTL de 45 segundos:
-// 1. Busca pos.config cuyos nombres comiencen por prefijos.
+// 1. Busca todos los pos.config disponibles en Odoo.
 // 2. Obtiene sesiones abiertas/abriendo por esos config_id (orden desc) y toma la más reciente por local.
 // 3. Para locales sin sesión abierta, obtiene la sesión cerrada más reciente.
 // 4. Calcula balance según estado: opened/opening_control -> cash_register_balance_end; closed -> cash_register_balance_end_real.
@@ -183,11 +163,8 @@ type posBalancesCache struct {
 }
 
 func (c *Client) fetchPOSBalancesUncached() (map[string]models.POSLocalDetail, float64, error) {
-	prefixes := []string{"Gran San", "Visto", "Lo Nuestro", "Burbuja", "San Jose", "Medellin", "Titanium"}
-
-	cfgDomain := buildNamePrefixDomain(prefixes)
 	cfgFields := []string{"name"}
-	cfgKw := map[string]interface{}{"domain": cfgDomain, "fields": cfgFields, "limit": 200}
+	cfgKw := map[string]interface{}{"domain": []interface{}{}, "fields": cfgFields, "limit": 1000}
 	rawCfg, err := c.callOdoo("pos.config", "search_read", []interface{}{}, cfgKw)
 	if err != nil {
 		return nil, 0, fmt.Errorf("config search: %w", err)
@@ -402,30 +379,7 @@ func toInterfaceSlice(ids []int64) []interface{} {
 }
 
 func normalizeLocalKey(name string) string {
-	lower := strings.ToLower(name)
-	switch {
-	case strings.HasPrefix(lower, "titanium"):
-		return "titanium"
-	case strings.HasPrefix(lower, "visto"):
-		return "visto"
-	case strings.HasPrefix(lower, "burbuja"):
-		return "burbuja_lo_nuestro"
-	case strings.HasPrefix(lower, "lo nuestro"):
-		return "lo_nuestro"
-	case strings.HasPrefix(lower, "gran san"):
-		return "gran_san"
-	case strings.HasPrefix(lower, "san jose"):
-		return "san_jose"
-	case strings.HasPrefix(lower, "medellin"):
-		return "medellin"
-	default:
-		// tomar primera palabra segura
-		parts := strings.Fields(lower)
-		if len(parts) > 0 {
-			return parts[0]
-		}
-		return "desconocido"
-	}
+	return strings.TrimSpace(name)
 }
 
 // Utilidades

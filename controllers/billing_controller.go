@@ -302,7 +302,7 @@ func getFixedCostTotalsByPOS() map[string]fixedCostTotals {
 
 	result := make(map[string]fixedCostTotals)
 	for _, c := range costs {
-		pos := strings.TrimSpace(c.PosName)
+		pos := normalizeBillingPOSName(c.PosName)
 		if pos == "" {
 			continue
 		}
@@ -344,8 +344,12 @@ func getNominaPerPOS(year, month int) map[string]float64 {
 
 	result := make(map[string]float64)
 	for _, a := range assignments {
+		pos := normalizeBillingPOSName(a.PosName)
+		if pos == "" {
+			continue
+		}
 		if paid, ok := paymentPaid[a.PaymentID]; ok {
-			result[a.PosName] += float64(paid)
+			result[pos] += float64(paid)
 		}
 	}
 	return result
@@ -381,11 +385,15 @@ func getNominaPerPOSBulk(year int) map[int]map[string]float64 {
 
 	// Agrupar por mes + POS
 	for _, a := range assignments {
+		pos := normalizeBillingPOSName(a.PosName)
+		if pos == "" {
+			continue
+		}
 		if paid, ok := paymentMap[a.PaymentID]; ok {
 			if result[a.Month] == nil {
 				result[a.Month] = make(map[string]float64)
 			}
-			result[a.Month][a.PosName] += float64(paid)
+			result[a.Month][pos] += float64(paid)
 		}
 	}
 	return result
@@ -783,16 +791,25 @@ func GetBillingMonthly(c *gin.Context) {
 	}
 	cfgMap := make(map[string]models.BillingConfig)
 	for _, cfg := range cfgs {
-		cfgMap[cfg.PosName] = cfg
+		cfgMap[normalizeBillingPOSName(cfg.PosName)] = cfg
 	}
 	fixedCostMap := getFixedCostTotalsByPOS()
+
+	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	if err != nil {
+		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo: %v\n", err)
+	}
 
 	// Comisión: sumar % de EmployeePOSAssignment por POS
 	var posAssignments []models.EmployeePOSAssignment
 	DB.Find(&posAssignments)
 	comisionPctMap := make(map[string]float64) // pos_name -> sum of commission %
 	for _, a := range posAssignments {
-		comisionPctMap[a.PosName] += a.CommissionPercentage
+		pos := normalizeBillingPOSName(a.PosName)
+		if pos == "" {
+			continue
+		}
+		comisionPctMap[pos] += a.CommissionPercentage
 	}
 
 	// Gastos comunes (gastos_locales + movimientos operativos detectados desde movements)
@@ -828,7 +845,7 @@ func GetBillingMonthly(c *gin.Context) {
 	rowKey := func(pos string, y, m int) string { return fmt.Sprintf("%s-%d-%d", pos, y, m) }
 	rowMap := make(map[string]models.BillingMonthly)
 	for _, r := range rows {
-		rowMap[rowKey(r.PosName, r.Year, r.Month)] = r
+		rowMap[rowKey(normalizeBillingPOSName(r.PosName), r.Year, r.Month)] = r
 	}
 
 	// gather all pos/month present either in ventas or rows
@@ -846,7 +863,16 @@ func GetBillingMonthly(c *gin.Context) {
 		if month > 0 && r.Month != month {
 			continue
 		}
-		posMonths[rowKey(r.PosName, r.Year, r.Month)] = struct{}{}
+		posMonths[rowKey(normalizeBillingPOSName(r.PosName), r.Year, r.Month)] = struct{}{}
+	}
+	for _, pos := range odooPOSNames {
+		if month > 0 {
+			posMonths[rowKey(pos, year, month)] = struct{}{}
+			continue
+		}
+		for m := 1; m <= 12; m++ {
+			posMonths[rowKey(pos, year, m)] = struct{}{}
+		}
 	}
 	for pos := range fixedCostMap {
 		if month > 0 {
@@ -1023,9 +1049,14 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	DB.Find(&cfgs)
 	cfgMap := make(map[string]models.BillingConfig)
 	for _, cfg := range cfgs {
-		cfgMap[cfg.PosName] = cfg
+		cfgMap[normalizeBillingPOSName(cfg.PosName)] = cfg
 	}
 	fixedCostMap := getFixedCostTotalsByPOS()
+
+	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	if err != nil {
+		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo al confirmar: %v\n", err)
+	}
 
 	// Gastos comunes (gastos_locales + movimientos operativos detectados)
 	startMonth := time.Date(body.Year, time.Month(body.Month), 1, 0, 0, 0, 0, time.Local)
@@ -1056,7 +1087,10 @@ func ConfirmBillingMonthly(c *gin.Context) {
 		}
 	}
 	for _, cfg := range cfgs {
-		allPOS[cfg.PosName] = struct{}{}
+		allPOS[normalizeBillingPOSName(cfg.PosName)] = struct{}{}
+	}
+	for _, pos := range odooPOSNames {
+		allPOS[pos] = struct{}{}
 	}
 	for pos := range fixedCostMap {
 		allPOS[pos] = struct{}{}
@@ -1073,7 +1107,11 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	DB.Find(&posAssignments)
 	comisionPctMap := make(map[string]float64)
 	for _, a := range posAssignments {
-		comisionPctMap[a.PosName] += a.CommissionPercentage
+		pos := normalizeBillingPOSName(a.PosName)
+		if pos == "" {
+			continue
+		}
+		comisionPctMap[pos] += a.CommissionPercentage
 	}
 
 	now := time.Now()

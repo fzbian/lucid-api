@@ -1420,5 +1420,16 @@ func OdooGetBilling(c *gin.Context) {
 		return
 	}
 
+	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	for _, pos := range odooPOSNames {
+		if _, ok := res[pos]; !ok {
+			res[pos] = map[string]float64{}
+		}
+	}
+
 	c.JSON(http.StatusOK, res)
 }

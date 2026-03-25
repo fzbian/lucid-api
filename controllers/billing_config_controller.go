@@ -28,7 +28,38 @@ func GetBillingConfigs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, cfgs)
+
+	cfgByPos := make(map[string]models.BillingConfig, len(cfgs))
+	for _, cfg := range cfgs {
+		cfg.PosName = normalizeBillingPOSName(cfg.PosName)
+		cfgByPos[cfg.PosName] = cfg
+	}
+
+	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	merged := make([]models.BillingConfig, 0, len(cfgByPos)+len(odooPOSNames))
+	for _, pos := range odooPOSNames {
+		if cfg, ok := cfgByPos[pos]; ok {
+			merged = append(merged, cfg)
+			delete(cfgByPos, pos)
+			continue
+		}
+		includeInReports := true
+		merged = append(merged, models.BillingConfig{
+			PosName:          pos,
+			IncludeInReports: &includeInReports,
+		})
+	}
+
+	for _, cfg := range cfgByPos {
+		merged = append(merged, cfg)
+	}
+
+	c.JSON(http.StatusOK, merged)
 }
 
 func SaveBillingConfigs(c *gin.Context) {
@@ -42,12 +73,16 @@ func SaveBillingConfigs(c *gin.Context) {
 
 	toSave := make([]models.BillingConfig, 0, len(body.Entries))
 	for _, e := range body.Entries {
+		posName := normalizeBillingPOSName(e.PosName)
+		if posName == "" {
+			continue
+		}
 		includeInReports := true
 		if e.IncludeInReports != nil {
 			includeInReports = *e.IncludeInReports
 		}
 		cfg := models.BillingConfig{
-			PosName:          e.PosName,
+			PosName:          posName,
 			IncludeInReports: &includeInReports,
 			Arriendo:         e.Arriendo,
 			Internet:         e.Internet,
@@ -59,6 +94,11 @@ func SaveBillingConfigs(c *gin.Context) {
 			AguaAplica:       e.AguaAplica,
 		}
 		toSave = append(toSave, cfg)
+	}
+
+	if len(toSave) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no hay configuraciones válidas para guardar"})
+		return
 	}
 
 	if err := DB.Clauses(clause.OnConflict{

@@ -199,11 +199,11 @@ func billingNominaAmount(payment models.NominaPayment) int64 {
 }
 
 // isPOSIncludedInReports define si un POS debe incluirse en informes.
-// Si no existe configuración explícita, se considera incluido por defecto.
+// Solo se consideran los POS activos en la configuración actual de billing.
 func isPOSIncludedInReports(cfgMap map[string]models.BillingConfig, pos string) bool {
-	cfg, ok := cfgMap[pos]
+	cfg, ok := cfgMap[normalizeBillingPOSName(pos)]
 	if !ok || cfg.IncludeInReports == nil {
-		return true
+		return ok
 	}
 	return *cfg.IncludeInReports
 }
@@ -834,15 +834,14 @@ func GetBillingMonthly(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	cfgMap := make(map[string]models.BillingConfig)
-	for _, cfg := range cfgs {
-		cfgMap[normalizeBillingPOSName(cfg.PosName)] = cfg
-	}
+	cfgMap := buildBillingConfigMap(cfgs)
 	fixedCostMap := getFixedCostTotalsByPOS()
 
 	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
 	if err != nil {
 		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo: %v\n", err)
+	} else if len(odooPOSNames) > 0 {
+		_, cfgMap = mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
 	}
 
 	// Comisión: sumar % de EmployeePOSAssignment por POS
@@ -1105,15 +1104,14 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	// Configs
 	var cfgs []models.BillingConfig
 	DB.Find(&cfgs)
-	cfgMap := make(map[string]models.BillingConfig)
-	for _, cfg := range cfgs {
-		cfgMap[normalizeBillingPOSName(cfg.PosName)] = cfg
-	}
+	cfgMap := buildBillingConfigMap(cfgs)
 	fixedCostMap := getFixedCostTotalsByPOS()
 
 	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
 	if err != nil {
 		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo al confirmar: %v\n", err)
+	} else if len(odooPOSNames) > 0 {
+		_, cfgMap = mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
 	}
 
 	// Gastos comunes (gastos_locales + movimientos operativos detectados)

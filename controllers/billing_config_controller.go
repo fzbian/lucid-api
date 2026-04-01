@@ -3,9 +3,11 @@ package controllers
 import (
 	"atm/models"
 	"net/http"
+	"sort"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -29,36 +31,25 @@ func GetBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	cfgByPos := make(map[string]models.BillingConfig, len(cfgs))
-	for _, cfg := range cfgs {
-		cfg.PosName = normalizeBillingPOSName(cfg.PosName)
-		cfgByPos[cfg.PosName] = cfg
-	}
-
 	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	merged := make([]models.BillingConfig, 0, len(cfgByPos)+len(odooPOSNames))
-	for _, pos := range odooPOSNames {
-		if cfg, ok := cfgByPos[pos]; ok {
-			merged = append(merged, cfg)
-			delete(cfgByPos, pos)
-			continue
+	if len(odooPOSNames) == 0 {
+		normalizedCfgs := make([]models.BillingConfig, 0, len(cfgs))
+		for _, cfg := range buildBillingConfigMap(cfgs) {
+			normalizedCfgs = append(normalizedCfgs, cfg)
 		}
-		includeInReports := true
-		merged = append(merged, models.BillingConfig{
-			PosName:          pos,
-			IncludeInReports: &includeInReports,
+		sort.Slice(normalizedCfgs, func(i, j int) bool {
+			return normalizedCfgs[i].PosName < normalizedCfgs[j].PosName
 		})
+		c.JSON(http.StatusOK, normalizedCfgs)
+		return
 	}
 
-	for _, cfg := range cfgByPos {
-		merged = append(merged, cfg)
-	}
-
+	merged, _ := mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
 	c.JSON(http.StatusOK, merged)
 }
 
@@ -72,6 +63,8 @@ func SaveBillingConfigs(c *gin.Context) {
 	}
 
 	toSave := make([]models.BillingConfig, 0, len(body.Entries))
+	submittedPOSNames := make([]string, 0, len(body.Entries))
+	submittedPOSSet := make(map[string]struct{}, len(body.Entries))
 	for _, e := range body.Entries {
 		posName := normalizeBillingPOSName(e.PosName)
 		if posName == "" {
@@ -94,6 +87,10 @@ func SaveBillingConfigs(c *gin.Context) {
 			AguaAplica:       e.AguaAplica,
 		}
 		toSave = append(toSave, cfg)
+		if _, exists := submittedPOSSet[posName]; !exists {
+			submittedPOSSet[posName] = struct{}{}
+			submittedPOSNames = append(submittedPOSNames, posName)
+		}
 	}
 
 	if len(toSave) == 0 {
@@ -101,10 +98,20 @@ func SaveBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	if err := DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "pos_name"}},
-		DoUpdates: clause.AssignmentColumns([]string{"include_in_reports", "arriendo", "internet", "luz", "luz_aplica", "gas", "gas_aplica", "agua", "agua_aplica", "updated_at"}),
-	}).Create(&toSave).Error; err != nil {
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "pos_name"}},
+			DoUpdates: clause.AssignmentColumns([]string{"include_in_reports", "arriendo", "internet", "luz", "luz_aplica", "gas", "gas_aplica", "agua", "agua_aplica", "updated_at"}),
+		}).Create(&toSave).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("pos_name NOT IN ?", submittedPOSNames).Delete(&models.BillingConfig{}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

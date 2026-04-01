@@ -18,9 +18,11 @@ type BillingMonthly struct {
 	Confirmed          bool       `json:"confirmed" gorm:"default:false"`
 	ConfirmedAt        *time.Time `json:"confirmed_at"`
 	Venta              float64    `json:"venta"`
+	VentaManual        bool       `json:"venta_manual" gorm:"default:false"`
 	TotalGastos        float64    `json:"total_gastos"`
 	UtilidadBruta      float64    `json:"utilidad_bruta"`
 	ComisionPorcentaje float64    `json:"comision_porcentaje"` // % global usado al confirmar
+	MargenManual       bool       `json:"margen_manual" gorm:"default:false"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

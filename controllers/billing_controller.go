@@ -13,15 +13,20 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 type billingMonthlyEntry struct {
-	PosName string  `json:"pos_name" binding:"required"`
-	Nomina  float64 `json:"nomina"`
+	PosName      string   `json:"pos_name" binding:"required"`
+	Nomina       *float64 `json:"nomina"`
+	Venta        *float64 `json:"venta"`
+	Margen       *float64 `json:"margen"`
+	VentaManual  *bool    `json:"venta_manual"`
+	MargenManual *bool    `json:"margen_manual"`
 }
 
-// SaveBillingMonthly upserts gastos y margen por local/mes (legacy, mantiene compatibilidad).
+// SaveBillingMonthly guarda ajustes manuales por local/mes para el informe.
 func SaveBillingMonthly(c *gin.Context) {
 	var body struct {
 		Year    int                   `json:"year" binding:"required"`
@@ -34,26 +39,62 @@ func SaveBillingMonthly(c *gin.Context) {
 	}
 
 	now := time.Now()
-	toSave := make([]models.BillingMonthly, 0, len(body.Entries))
-	for _, e := range body.Entries {
-		toSave = append(toSave, models.BillingMonthly{
-			PosName:   e.PosName,
-			Year:      body.Year,
-			Month:     body.Month,
-			Nomina:    e.Nomina,
-			UpdatedAt: now,
-		})
-	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		for _, e := range body.Entries {
+			pos := normalizeBillingPOSName(e.PosName)
+			if pos == "" {
+				continue
+			}
 
-	if err := DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "pos_name"}, {Name: "year"}, {Name: "month"}},
-		DoUpdates: clause.AssignmentColumns([]string{"nomina", "updated_at"}),
-	}).Create(&toSave).Error; err != nil {
+			var row models.BillingMonthly
+			err := tx.Where("pos_name = ? AND year = ? AND month = ?", pos, body.Year, body.Month).First(&row).Error
+			if err != nil {
+				if err != gorm.ErrRecordNotFound {
+					return err
+				}
+				row = models.BillingMonthly{
+					PosName: pos,
+					Year:    body.Year,
+					Month:   body.Month,
+				}
+				if err := tx.Create(&row).Error; err != nil {
+					return err
+				}
+			}
+
+			updates := map[string]interface{}{
+				"updated_at": now,
+			}
+			if e.Nomina != nil {
+				updates["nomina"] = *e.Nomina
+			}
+			if e.Venta != nil {
+				updates["venta"] = *e.Venta
+			}
+			if e.Margen != nil {
+				updates["margen"] = *e.Margen
+			}
+			if e.VentaManual != nil {
+				updates["venta_manual"] = *e.VentaManual
+			}
+			if e.MargenManual != nil {
+				updates["margen_manual"] = *e.MargenManual
+			}
+
+			if len(updates) == 1 {
+				continue
+			}
+			if err := tx.Model(&row).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave)})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(body.Entries)})
 }
 
 func resolveFortnightSlot(payment models.NominaPayment) int {
@@ -743,7 +784,11 @@ func GetBillingMonthly(c *gin.Context) {
 		Year               int        `json:"year"`
 		Month              int        `json:"month"`
 		Venta              float64    `json:"venta"`
+		VentaOdoo          float64    `json:"venta_odoo"`
+		VentaManual        bool       `json:"venta_manual"`
 		Margen             float64    `json:"margen"`
+		MargenOdoo         float64    `json:"margen_odoo"`
+		MargenManual       bool       `json:"margen_manual"`
 		GastosComunes      float64    `json:"gastos_comunes"`
 		Servicios          float64    `json:"servicios"`
 		Nomina             float64    `json:"nomina"`
@@ -922,11 +967,16 @@ func GetBillingMonthly(c *gin.Context) {
 			continue
 		}
 
-		venta := getVenta(pos, m)
+		ventaOdoo := getVenta(pos, m)
+		venta := ventaOdoo
 		row := rowMap[key]
-		rowMargen := row.Margen
-		if rowMargen == 0 {
-			rowMargen = getMargen(pos, m)
+		if row.VentaManual {
+			venta = row.Venta
+		}
+		margenOdoo := getMargen(pos, m)
+		rowMargen := margenOdoo
+		if row.MargenManual {
+			rowMargen = row.Margen
 		}
 		fixedTotals := fixedCostMap[pos]
 		serviciosTot := fixedTotals.Servicios
@@ -961,7 +1011,11 @@ func GetBillingMonthly(c *gin.Context) {
 				Year:               year,
 				Month:              m,
 				Venta:              row.Venta,
+				VentaOdoo:          ventaOdoo,
+				VentaManual:        row.VentaManual,
 				Margen:             row.Margen,
+				MargenOdoo:         margenOdoo,
+				MargenManual:       row.MargenManual,
 				GastosComunes:      row.GastosComunes,
 				Servicios:          row.Servicios,
 				Nomina:             row.Nomina,
@@ -980,7 +1034,11 @@ func GetBillingMonthly(c *gin.Context) {
 				Year:               year,
 				Month:              m,
 				Venta:              venta,
+				VentaOdoo:          ventaOdoo,
+				VentaManual:        row.VentaManual,
 				Margen:             rowMargen,
+				MargenOdoo:         margenOdoo,
+				MargenManual:       row.MargenManual,
 				GastosComunes:      gastosComunes,
 				Servicios:          serviciosTot,
 				Nomina:             nominaPerPos,
@@ -1075,6 +1133,13 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	// Nómina por POS desde asignaciones de empleados + pagos parciales
 	nominaByPos := getNominaPerPOS(body.Year, body.Month)
 
+	var existingRows []models.BillingMonthly
+	DB.Where("year = ? AND month = ?", body.Year, body.Month).Find(&existingRows)
+	rowMap := make(map[string]models.BillingMonthly, len(existingRows))
+	for _, row := range existingRows {
+		rowMap[normalizeBillingPOSName(row.PosName)] = row
+	}
+
 	// Recolectar todos los POS
 	allPOS := make(map[string]struct{})
 	if ventas != nil {
@@ -1121,8 +1186,15 @@ func ConfirmBillingMonthly(c *gin.Context) {
 		if !isPOSIncludedInReports(cfgMap, pos) {
 			continue
 		}
+		existingRow := rowMap[pos]
 		venta := getVenta(pos)
+		if existingRow.VentaManual {
+			venta = existingRow.Venta
+		}
 		margen := getMargen(pos)
+		if existingRow.MargenManual {
+			margen = existingRow.Margen
+		}
 		fixedTotals := fixedCostMap[pos]
 		serviciosTot := fixedTotals.Servicios
 		arriendo := fixedTotals.Arriendo
@@ -1147,9 +1219,11 @@ func ConfirmBillingMonthly(c *gin.Context) {
 			Confirmed:          true,
 			ConfirmedAt:        &now,
 			Venta:              venta,
+			VentaManual:        existingRow.VentaManual,
 			TotalGastos:        gastosTot,
 			UtilidadBruta:      utilidadBruta,
 			ComisionPorcentaje: comisionPct,
+			MargenManual:       existingRow.MargenManual,
 			UpdatedAt:          now,
 		}
 
@@ -1158,7 +1232,7 @@ func ConfirmBillingMonthly(c *gin.Context) {
 			DoUpdates: clause.AssignmentColumns([]string{
 				"gastos_comunes", "servicios", "nomina", "arriendo", "margen",
 				"confirmed", "confirmed_at", "venta", "total_gastos", "utilidad_bruta",
-				"comision_porcentaje", "updated_at",
+				"comision_porcentaje", "venta_manual", "margen_manual", "updated_at",
 			}),
 		}).Create(&row).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error confirmando informe: " + err.Error()})

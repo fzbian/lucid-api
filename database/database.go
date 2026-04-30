@@ -104,6 +104,11 @@ func Connect() (*gorm.DB, error) {
 			&models.Transaccion{},
 			&models.TransaccionLog{},
 			&models.GastoLocal{},
+			&models.CarteraCliente{},
+			&models.CarteraFactura{},
+			&models.CarteraFacturaLinea{},
+			&models.CarteraAbono{},
+			&models.CarteraAbonoAplicacion{},
 			&models.RoleConfig{},
 			&models.NominaConfig{},
 			&models.UserPayroll{},
@@ -155,7 +160,7 @@ func Seed(db *gorm.DB) error {
 
 	// 2. Categorias obligatorias (siempre presentes con IDs fijos)
 	requiredCategorias := []models.Categoria{
-		{ID: 15, Nombre: "Cartera de Clientes", Tipo: "INGRESO"},
+		{ID: 15, Nombre: "Cartera de Clientes", Tipo: "INGRESO", IsCarteraClientes: true},
 		{ID: 16, Nombre: "Efectivo Puntos de Venta", Tipo: "INGRESO"},
 		{ID: 17, Nombre: "Logstica y Transporte", Tipo: "INGRESO"},
 		{ID: 18, Nombre: "Trading", Tipo: "INGRESO"},

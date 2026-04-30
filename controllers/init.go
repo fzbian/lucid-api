@@ -22,6 +22,7 @@ func RegisterCategoriaRoutes(rg *gin.RouterGroup) {
 		r.PUT(":id", UpdateCategoria)
 		r.DELETE(":id", DeleteCategoria)
 		r.POST(":id/set-gasto-operativo", SetGastoOperativo)
+		r.POST(":id/set-cartera-clientes", SetCarteraClientes)
 	}
 }
 
@@ -75,6 +76,7 @@ func RegisterOdooRoutes(rg *gin.RouterGroup) {
 	{
 		r.POST("/cashout", OdooCashOut)
 		r.GET("/pos", OdooListPOS)
+		r.GET("/pos-sessions", OdooPOSSessionsOverview)
 		r.GET("/billing", OdooGetBilling)
 		r.GET("/orders", OdooListInvoicedOrders)
 		r.GET("/orders/overview", OdooOrdersOverviewByPOS)
@@ -108,6 +110,36 @@ func RegisterBillingRoutes(rg *gin.RouterGroup) {
 		r.POST("/nomina-assign", AssignNominaToPOS)
 		r.POST("/nomina-unassign", RemoveNominaFromPOS)
 		r.POST("/nomina-reset", ResetNominaAssignmentsForMonth)
+	}
+}
+
+// RegisterCarteraRoutes registra rutas del módulo de cartera
+func RegisterCarteraRoutes(rg *gin.RouterGroup) {
+	r := rg.Group("/cartera")
+	{
+		r.GET("/clientes", ListCarteraClientes)
+		r.POST("/clientes", CreateCarteraCliente)
+		r.GET("/clientes/:id", GetCarteraCliente)
+		r.PUT("/clientes/:id", UpdateCarteraCliente)
+		r.DELETE("/clientes/:id", DeleteCarteraCliente)
+		r.POST("/clientes/:id/notificar-estado-cuenta", NotifyCarteraEstadoCuenta)
+		r.GET("/clientes/:id/ingresos-pendientes", ListCarteraPendingIngresosByClient)
+		r.GET("/clientes/:id/facturas", ListCarteraFacturasPorCliente)
+		r.POST("/clientes/:id/facturas", CreateCarteraFactura)
+
+		r.GET("/facturas/:id", GetCarteraFactura)
+		r.PUT("/facturas/:id", UpdateCarteraFactura)
+		r.DELETE("/facturas/:id", DeleteCarteraFactura)
+		r.POST("/facturas/:id/notificar-abonos", NotifyCarteraFacturaAbonos)
+		r.GET("/facturas/:id/abonos", ListCarteraAbonosPorFactura)
+
+		r.POST("/abonos/soporte", UploadCarteraSoporte)
+		r.POST("/abonos", CreateCarteraAbono)
+		r.GET("/abonos/:id", GetCarteraAbono)
+		r.PUT("/abonos/:id", UpdateCarteraAbono)
+		r.DELETE("/abonos/:id", DeleteCarteraAbono)
+
+		r.GET("/ingresos-pendientes/:id", GetCarteraPendingIngreso)
 	}
 }
 

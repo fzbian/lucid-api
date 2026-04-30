@@ -70,6 +70,7 @@ func main() {
 		controllers.RegisterNotifyRoutes(api)
 		controllers.RegisterOdooRoutes(api)
 		controllers.RegisterBillingRoutes(api)
+		controllers.RegisterCarteraRoutes(api)
 		controllers.RegisterCuentaRoutes(api)
 		controllers.RegisterLimpiarRoutes(api)
 		controllers.RegisterGastosRoutes(api)

@@ -9,19 +9,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// OdooOrdersOverviewByPOS godoc
-// @Summary Resumen de pedidos por POS y sesiones
-// @Description Devuelve tarjetas por punto de venta con listado de sesiones ordenadas, optimizado para UI con una sola petición.
+// OdooPOSSessionsOverview godoc
+// @Summary Resumen de horarios de sesiones POS
+// @Description Devuelve las sesiones POS agrupadas por punto de venta para consultar aperturas y cierres por rango.
 // @Produce json
 // @Param from query string false "Fecha inicio (RFC3339 o YYYY-MM-DD)"
 // @Param to query string false "Fecha fin (RFC3339 o YYYY-MM-DD)"
 // @Param local query string false "Nombre del local/POS (búsqueda parcial)"
-// @Param limit query int false "Máximo de pedidos fuente a leer en Odoo (default 12000, max 30000)"
+// @Param limit query int false "Máximo de sesiones a leer en Odoo (default 5000, max 20000)"
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} map[string]interface{}
 // @Failure 500 {object} map[string]interface{}
-// @Router /api/odoo/orders/overview [get]
-func OdooOrdersOverviewByPOS(c *gin.Context) {
+// @Router /api/odoo/pos-sessions [get]
+func OdooPOSSessionsOverview(c *gin.Context) {
 	from, fromRaw, err := parseDateFilter(c.Query("from"), false)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "formato de 'from' inválido. Use RFC3339 o YYYY-MM-DD"})
@@ -38,7 +38,7 @@ func OdooOrdersOverviewByPOS(c *gin.Context) {
 	}
 
 	local := strings.TrimSpace(c.Query("local"))
-	limit := 12000
+	limit := 5000
 	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 {
@@ -58,7 +58,7 @@ func OdooOrdersOverviewByPOS(c *gin.Context) {
 		return
 	}
 
-	overview, err := client.GetPOSSessionsOverview(odoo.POSSessionOverviewQuery{
+	result, err := client.GetPOSSessionsHoursOverview(odoo.POSSessionHoursQuery{
 		From:  from,
 		To:    to,
 		Local: local,
@@ -76,7 +76,7 @@ func OdooOrdersOverviewByPOS(c *gin.Context) {
 			"local": local,
 			"limit": limit,
 		},
-		"totals": overview.Totals,
-		"data":   overview.Data,
+		"totals": result.Totals,
+		"data":   result.Data,
 	})
 }

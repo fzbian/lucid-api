@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -285,6 +286,16 @@ func resolveSundayValueByPeriod(global models.NominaConfig, periodStart time.Tim
 		return global.ValorDominical
 	}
 	return global.ValorDominicalS1
+}
+
+func resolveNominaFixedDeduction(config models.NominaConfig, fixedValue int64, legacyPercentage float64, paidBase int64) int64 {
+	if fixedValue > 0 {
+		return fixedValue
+	}
+	if legacyPercentage > 0 && paidBase > 0 {
+		return int64(math.Round(float64(paidBase) * (legacyPercentage / 100)))
+	}
+	return 0
 }
 
 func hashSignatureToken(token string) string {
@@ -564,6 +575,8 @@ func GetNominaConfig(c *gin.Context) {
 			ValorDominical:    100000,
 			ValorDominicalS1:  100000,
 			ValorDominicalS2:  100000,
+			ValorSalud:        0,
+			ValorPension:      0,
 			PorcentajeSalud:   4.0,
 			PorcentajePension: 4.0,
 		})
@@ -590,6 +603,8 @@ func UpdateNominaConfig(c *gin.Context) {
 	config.ValorDominicalS1 = input.ValorDominicalS1
 	config.ValorDominicalS2 = input.ValorDominicalS2
 	config.ValorMadrugon = input.ValorMadrugon
+	config.ValorSalud = input.ValorSalud
+	config.ValorPension = input.ValorPension
 	config.PorcentajeSalud = input.PorcentajeSalud
 	config.PorcentajePension = input.PorcentajePension
 	config.SalarioMinimo = input.SalarioMinimo
@@ -808,7 +823,7 @@ func GeneratePayment(c *gin.Context) {
 		transport = global.AuxilioTransporte / 2
 	}
 
-	// Defaults if missing
+	// Defaults legacy si aun no configuran valores fijos.
 	if global.PorcentajeSalud == 0 {
 		global.PorcentajeSalud = 4.0
 	}
@@ -816,11 +831,11 @@ func GeneratePayment(c *gin.Context) {
 		global.PorcentajePension = 4.0
 	}
 
-	// Salud and Pension (Dynamic %)
+	// Salud y pension como valor fijo configurable, con fallback legacy.
 	var health, pension int64
 	if input.IncludesSecurity {
-		health = int64(float64(paidBase) * (global.PorcentajeSalud / 100))
-		pension = int64(float64(paidBase) * (global.PorcentajePension / 100))
+		health = resolveNominaFixedDeduction(global, global.ValorSalud, global.PorcentajeSalud, paidBase)
+		pension = resolveNominaFixedDeduction(global, global.ValorPension, global.PorcentajePension, paidBase)
 	} else {
 		health = 0
 		pension = 0
@@ -1083,6 +1098,8 @@ func AccessPaymentSigningLink(c *gin.Context) {
 		"config": gin.H{
 			"company_name":       cfg.CompanyName,
 			"nit":                cfg.NIT,
+			"valor_salud":        cfg.ValorSalud,
+			"valor_pension":      cfg.ValorPension,
 			"porcentaje_salud":   cfg.PorcentajeSalud,
 			"porcentaje_pension": cfg.PorcentajePension,
 		},

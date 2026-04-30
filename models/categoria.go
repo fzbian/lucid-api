@@ -4,11 +4,12 @@ import "time"
 
 // Categoria representa la tabla categorias
 type Categoria struct {
-	ID               int32     `gorm:"primaryKey;type:int" json:"id"`
-	Nombre           string    `gorm:"size:100;not null" json:"nombre"`
-	Tipo             string    `gorm:"type:enum('INGRESO','EGRESO');not null" json:"tipo"`
-	IsGastoOperativo bool      `gorm:"column:is_gasto_operativo;default:false" json:"is_gasto_operativo"`
-	CreatedAt        time.Time `json:"created_at" gorm:"-"`
+	ID                int32     `gorm:"primaryKey;type:int" json:"id"`
+	Nombre            string    `gorm:"size:100;not null" json:"nombre"`
+	Tipo              string    `gorm:"type:enum('INGRESO','EGRESO');not null" json:"tipo"`
+	IsGastoOperativo  bool      `gorm:"column:is_gasto_operativo;default:false" json:"is_gasto_operativo"`
+	IsCarteraClientes bool      `gorm:"column:is_cartera_clientes;default:false" json:"is_cartera_clientes"`
+	CreatedAt         time.Time `json:"created_at" gorm:"-"`
 }
 
 // Input para crear categoria

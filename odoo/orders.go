@@ -13,6 +13,7 @@ type POSOrdersQuery struct {
 	From      time.Time
 	To        time.Time
 	Local     string
+	Search    string
 	SessionID int64
 	Limit     int
 	Offset    int
@@ -177,6 +178,10 @@ func (c *Client) GetPOSInvoicedOrders(q POSOrdersQuery) (POSInvoicedOrdersResult
 	}
 	if strings.TrimSpace(q.Local) != "" {
 		domain = append(domain, []any{"config_id", "ilike", strings.TrimSpace(q.Local)})
+	}
+	if strings.TrimSpace(q.Search) != "" {
+		search := strings.TrimSpace(q.Search)
+		domain = append(domain, "|", []any{"pos_reference", "ilike", search}, []any{"note", "ilike", search})
 	}
 	if q.SessionID > 0 {
 		domain = append(domain, []any{"session_id", "=", q.SessionID})

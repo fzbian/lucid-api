@@ -8,6 +8,7 @@ var AllowedRoleViewIDs = []string{
 	"new",
 	"gastos",
 	"pedidos",
+	"pos-sessions",
 	"wallet",
 	"payroll",
 	"reports",

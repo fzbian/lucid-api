@@ -129,6 +129,12 @@ func UpdateCategoria(c *gin.Context) {
 			return
 		}
 		categoria.Tipo = tipo
+		if tipo == "INGRESO" {
+			categoria.IsGastoOperativo = false
+		}
+		if tipo == "EGRESO" {
+			categoria.IsCarteraClientes = false
+		}
 	}
 	if err := DB.Save(&categoria).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -205,6 +211,52 @@ func SetGastoOperativo(c *gin.Context) {
 	}
 
 	DB.First(&categoria, id) // reload
+	c.JSON(http.StatusOK, categoria)
+}
+
+// SetCarteraClientes marca una categoría como la categoría usada para ingresos de cartera.
+// Solo una categoría puede tener is_cartera_clientes=true a la vez.
+func SetCarteraClientes(c *gin.Context) {
+	id := c.Param("id")
+	var categoria models.Categoria
+	if err := DB.First(&categoria, id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "categoria no encontrada"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var body struct {
+		IsCarteraClientes bool `json:"is_cartera_clientes"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if body.IsCarteraClientes && strings.ToUpper(strings.TrimSpace(categoria.Tipo)) != "INGRESO" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "solo una categoría de INGRESO puede marcarse como cartera de clientes"})
+		return
+	}
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.Categoria{}).Where("is_cartera_clientes = ?", true).Update("is_cartera_clientes", false).Error; err != nil {
+			return err
+		}
+		if body.IsCarteraClientes {
+			if err := tx.Model(&categoria).Update("is_cartera_clientes", true).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	DB.First(&categoria, id)
 	c.JSON(http.StatusOK, categoria)
 }
 
@@ -340,6 +392,21 @@ func CreateTransaccion(c *gin.Context) {
 		if err := tx.First(&categoria, input.CategoriaID).Error; err != nil {
 			return fmt.Errorf("categoria no encontrada") // Simplificado para devolver error genérico si falla
 		}
+		if categoria.IsCarteraClientes {
+			if strings.ToUpper(strings.TrimSpace(categoria.Tipo)) != "INGRESO" {
+				return fmt.Errorf("la categoría marcada como cartera de clientes debe ser de ingreso")
+			}
+			if input.CarteraClienteID == nil || *input.CarteraClienteID == 0 {
+				return fmt.Errorf("cliente_cartera_requerido")
+			}
+			var carteraCliente models.CarteraCliente
+			if err := tx.First(&carteraCliente, *input.CarteraClienteID).Error; err != nil {
+				if err == gorm.ErrRecordNotFound {
+					return fmt.Errorf("cliente_cartera_no_encontrado")
+				}
+				return err
+			}
+		}
 
 		// 2. Obtener y Bloquear Caja (para evitar condiciones de carrera)
 		var caja models.Caja
@@ -359,11 +426,12 @@ func CreateTransaccion(c *gin.Context) {
 
 		// 4. Crear Transacción
 		transaccion = models.Transaccion{
-			CategoriaID: input.CategoriaID,
-			CajaID:      input.CajaID,
-			Monto:       input.Monto,
-			Descripcion: input.Descripcion,
-			Usuario:     input.Usuario,
+			CategoriaID:      input.CategoriaID,
+			CajaID:           input.CajaID,
+			Monto:            input.Monto,
+			Descripcion:      input.Descripcion,
+			Usuario:          input.Usuario,
+			CarteraClienteID: input.CarteraClienteID,
 		}
 		if err := tx.Create(&transaccion).Error; err != nil {
 			return err
@@ -412,6 +480,14 @@ func CreateTransaccion(c *gin.Context) {
 				"monto_solicitado": monto,
 				"caja_id":          input.CajaID,
 			})
+			return
+		}
+		if errMsg == "cliente_cartera_requerido" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "debes seleccionar un cliente de cartera para esta categoría"})
+			return
+		}
+		if errMsg == "cliente_cartera_no_encontrado" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "el cliente seleccionado de cartera no existe"})
 			return
 		}
 		if errMsg == "categoria no encontrada" || errMsg == "caja no encontrada" {
@@ -511,6 +587,9 @@ func UpdateTransaccion(c *gin.Context) {
 				return fmt.Errorf("transaccion no encontrada")
 			}
 			return err
+		}
+		if t.CarteraAbonoID != nil {
+			return fmt.Errorf("transaccion_cartera_bloqueada")
 		}
 
 		// 1. Capturar Estado Anterior
@@ -695,6 +774,10 @@ func UpdateTransaccion(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
 			return
 		}
+		if errMsg == "transaccion_cartera_bloqueada" {
+			c.JSON(http.StatusConflict, gin.H{"error": "esta transacción ya fue asignada a un abono de cartera y no puede editarse desde movimientos"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -735,6 +818,9 @@ func DeleteTransaccion(c *gin.Context) {
 				return fmt.Errorf("transaccion no encontrada")
 			}
 			return err
+		}
+		if t.CarteraAbonoID != nil {
+			return fmt.Errorf("transaccion_cartera_bloqueada")
 		}
 		cajaID = t.CajaID
 		monto = t.Monto
@@ -793,6 +879,10 @@ func DeleteTransaccion(c *gin.Context) {
 	if err != nil {
 		if err.Error() == "transaccion no encontrada" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "transaccion no encontrada"})
+			return
+		}
+		if err.Error() == "transaccion_cartera_bloqueada" {
+			c.JSON(http.StatusConflict, gin.H{"error": "esta transacción ya fue asignada a un abono de cartera y no puede eliminarse desde movimientos"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

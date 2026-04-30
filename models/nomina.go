@@ -10,8 +10,10 @@ type NominaConfig struct {
 	ValorDominicalS1  int64     `json:"valor_dominical_s1"` // Valor Semestre 1 (Ene-Jun)
 	ValorDominicalS2  int64     `json:"valor_dominical_s2"` // Valor Semestre 2 (Jul-Dic)
 	ValorMadrugon     int64     `json:"valor_madrugon"`     // Valor por hora
-	PorcentajeSalud   float64   `json:"porcentaje_salud"`   // % (e.g. 4.0)
-	PorcentajePension float64   `json:"porcentaje_pension"` // % (e.g. 4.0)
+	ValorSalud        int64     `json:"valor_salud"`        // Valor fijo a descontar si aplica
+	ValorPension      int64     `json:"valor_pension"`      // Valor fijo a descontar si aplica
+	PorcentajeSalud   float64   `json:"porcentaje_salud"`   // Legacy fallback
+	PorcentajePension float64   `json:"porcentaje_pension"` // Legacy fallback
 	SalarioMinimo     int64     `json:"salario_minimo"`     // Referencia (opcional)
 	CompanyName       string    `json:"company_name"`       // Nombre Empresa para recibos
 	NIT               string    `json:"nit"`                // NIT Empresa para recibos
@@ -57,8 +59,8 @@ type NominaPayment struct {
 
 	IncludesTransportAid bool  `json:"includes_transport_aid" gorm:"default:true"` // Si incluyó auxilio transporte
 	IncludesSecurity     bool  `json:"includes_security"`                          // Si incluyó seguridad social
-	Health               int64 `json:"health"`                                     // Deducción 4%
-	Pension              int64 `json:"pension"`                                    // Deducción 4%
+	Health               int64 `json:"health"`                                     // Deducción de salud aplicada
+	Pension              int64 `json:"pension"`                                    // Deducción de pensión aplicada
 	Advance              int64 `json:"advance"`                                    // Adelanto descontado
 	Commission           int64 `json:"commission"`                                 // Comisión por administración de POS (solo 2da quincena)
 	IsPartial            bool  `json:"is_partial" gorm:"default:false"`            // True = pago parcial, pendiente de comisión

@@ -18,6 +18,7 @@ import (
 // @Param from query string false "Fecha inicio (RFC3339 o YYYY-MM-DD)"
 // @Param to query string false "Fecha fin (RFC3339 o YYYY-MM-DD)"
 // @Param local query string false "Nombre del local/POS (búsqueda parcial)"
+// @Param search query string false "Buscar por referencia POS o nota"
 // @Param session_id query int false "ID de sesión POS"
 // @Param limit query int false "Máximo de resultados (default 200, max 1000)"
 // @Param offset query int false "Desplazamiento de resultados (default 0)"
@@ -75,6 +76,7 @@ func OdooListInvoicedOrders(c *gin.Context) {
 	}
 
 	local := strings.TrimSpace(c.Query("local"))
+	search := strings.TrimSpace(c.Query("search"))
 
 	client, err := odoo.NewFromEnv()
 	if err != nil {
@@ -90,6 +92,7 @@ func OdooListInvoicedOrders(c *gin.Context) {
 		From:      from,
 		To:        to,
 		Local:     local,
+		Search:    search,
 		SessionID: sessionID,
 		Limit:     limit,
 		Offset:    offset,
@@ -104,6 +107,7 @@ func OdooListInvoicedOrders(c *gin.Context) {
 			"from":       fromRaw,
 			"to":         toRaw,
 			"local":      local,
+			"search":     search,
 			"session_id": sessionID,
 			"limit":      result.Limit,
 			"offset":     result.Offset,

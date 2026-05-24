@@ -41,14 +41,15 @@ type CarteraFactura struct {
 func (CarteraFactura) TableName() string { return "cartera_facturas" }
 
 type CarteraFacturaLinea struct {
-	ID        uint           `gorm:"primaryKey" json:"id"`
-	FacturaID uint           `gorm:"index;not null" json:"factura_id"`
-	Concepto  string         `gorm:"size:255;not null" json:"concepto"`
-	Cantidad  float64        `gorm:"type:decimal(15,3);not null;default:1" json:"cantidad"`
-	Valor     float64        `gorm:"type:decimal(15,2);not null" json:"valor"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
-	Factura   CarteraFactura `gorm:"foreignKey:FacturaID" json:"factura,omitempty"`
+	ID            uint           `gorm:"primaryKey" json:"id"`
+	FacturaID     uint           `gorm:"index;not null" json:"factura_id"`
+	Concepto      string         `gorm:"size:255;not null" json:"concepto"`
+	Cantidad      float64        `gorm:"type:decimal(15,3);not null;default:1" json:"cantidad"`
+	ValorUnitario float64        `gorm:"type:decimal(15,2);not null;default:0" json:"valor_unitario"`
+	Valor         float64        `gorm:"type:decimal(15,2);not null" json:"valor"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	Factura       CarteraFactura `gorm:"foreignKey:FacturaID" json:"factura,omitempty"`
 }
 
 func (CarteraFacturaLinea) TableName() string { return "cartera_factura_lineas" }
@@ -106,9 +107,10 @@ type CarteraFacturaInput struct {
 }
 
 type CarteraFacturaLineaInput struct {
-	Concepto string  `json:"concepto"`
-	Cantidad float64 `json:"cantidad"`
-	Valor    float64 `json:"valor"`
+	Concepto      string  `json:"concepto"`
+	Cantidad      float64 `json:"cantidad"`
+	ValorUnitario float64 `json:"valor_unitario"`
+	Valor         float64 `json:"valor"`
 }
 
 type CarteraAbonoDistribucionInput struct {

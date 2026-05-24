@@ -821,7 +821,9 @@ func ListCarteraAbonosPorFactura(c *gin.Context) {
 	}
 
 	var factura models.CarteraFactura
-	if err := DB.Preload("Cliente").First(&factura, facturaID).Error; err != nil {
+	if err := DB.Preload("Cliente").
+		Preload("Lineas", func(db *gorm.DB) *gorm.DB { return db.Order("id asc") }).
+		First(&factura, facturaID).Error; err != nil {
 		handleCarteraNotFound(c, err, "factura no encontrada")
 		return
 	}
@@ -1431,16 +1433,26 @@ func normalizeCarteraFacturaLineas(input []models.CarteraFacturaLineaInput) ([]m
 		if cantidad <= 0 {
 			return nil, 0, fmt.Errorf("la cantidad de la línea %d debe ser mayor a 0", index+1)
 		}
-		if valor <= 0 {
+		unitario := roundMoney(item.ValorUnitario)
+		if unitario <= 0 {
+			unitario = roundMoney(valor / cantidad)
+		}
+		if unitario <= 0 {
 			return nil, 0, fmt.Errorf("el valor de la línea %d debe ser mayor a 0", index+1)
 		}
 
+		lineTotal := roundMoney(cantidad * unitario)
+		if lineTotal <= 0 {
+			return nil, 0, fmt.Errorf("el valor total de la línea %d debe ser mayor a 0", index+1)
+		}
+
 		lineas = append(lineas, models.CarteraFacturaLinea{
-			Concepto: concepto,
-			Cantidad: cantidad,
-			Valor:    valor,
+			Concepto:      concepto,
+			Cantidad:      cantidad,
+			ValorUnitario: unitario,
+			Valor:         lineTotal,
 		})
-		total += valor
+		total += lineTotal
 	}
 
 	return lineas, roundMoney(total), nil

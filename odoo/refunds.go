@@ -73,10 +73,12 @@ type posConfigRefundSnapshot struct {
 }
 
 type posSessionRefundSnapshot struct {
-	ID       int64
-	Name     string
-	State    string
-	ConfigID int64
+	ID                   int64
+	Name                 string
+	State                string
+	ConfigID             int64
+	UpdateStockAtClosing bool
+	HasUpdateStockField  bool
 }
 
 func (c *Client) CreateFullOrderRefund(orderID int64) (POSFullRefundResult, error) {
@@ -228,6 +230,9 @@ func (c *Client) CreateFullOrderRefund(orderID int64) (POSFullRefundResult, erro
 	if refundOrderID <= 0 {
 		return POSFullRefundResult{}, fmt.Errorf("odoo no devolvió id del pedido de reembolso")
 	}
+	if err := c.moveRefundOrderToOpenSession(refundOrderID, session); err != nil {
+		return POSFullRefundResult{}, err
+	}
 
 	nowRaw := time.Now().UTC().Format("2006-01-02 15:04:05")
 	for _, payment := range paymentsByMethod {
@@ -247,21 +252,10 @@ func (c *Client) CreateFullOrderRefund(orderID int64) (POSFullRefundResult, erro
 	}
 
 	realtimeStockProcessed := false
-	if requiresRealtimePicking {
-		stockUpdated := false
-		if _, err := c.callOdoo("pos.order", "_create_order_picking", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{}); err == nil {
-			stockUpdated = true
-		} else if _, err2 := c.callOdoo("pos.order", "create_picking", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{}); err2 == nil {
-			stockUpdated = true
-		}
-
-		if stockUpdated {
-			_, _ = c.callOdoo("pos.order", "_compute_total_cost_in_real_time", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{})
-			realtimeStockProcessed = true
-		} else if canCallPrivate {
-			// Si Odoo confirmó que debía crear picking en tiempo real, mantener fallo duro.
-			return POSFullRefundResult{}, fmt.Errorf("actualizar inventario del reembolso: no se pudo crear picking")
-		}
+	if processed, err := c.processRefundStock(refundOrderID, session, requiresRealtimePicking, canCallPrivate); err != nil {
+		return POSFullRefundResult{}, err
+	} else {
+		realtimeStockProcessed = processed
 	}
 
 	refundOrder, err := c.fetchOrderRefundSnapshot(refundOrderID)
@@ -286,6 +280,32 @@ func (c *Client) CreateFullOrderRefund(orderID int64) (POSFullRefundResult, erro
 		RealtimeStockProcessed: realtimeStockProcessed,
 		CreatedAtISO:           time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func (c *Client) moveRefundOrderToOpenSession(refundOrderID int64, session posSessionRefundSnapshot) error {
+	refundDraft, err := c.fetchOrderRefundSnapshot(refundOrderID)
+	if err != nil {
+		return fmt.Errorf("validar sesión del reembolso: %w", err)
+	}
+	if refundDraft.ID <= 0 {
+		return fmt.Errorf("validar sesión del reembolso: pedido de reembolso no encontrado")
+	}
+	if refundDraft.SessionID == session.ID {
+		return nil
+	}
+
+	if _, err := c.callOdoo("pos.order", "write", []interface{}{[]interface{}{refundOrderID}, map[string]interface{}{"session_id": session.ID}}, map[string]interface{}{}); err != nil {
+		return fmt.Errorf("asignar reembolso a la sesión abierta del local: %w", err)
+	}
+
+	updated, err := c.fetchOrderRefundSnapshot(refundOrderID)
+	if err != nil {
+		return fmt.Errorf("verificar sesión del reembolso: %w", err)
+	}
+	if updated.SessionID != session.ID {
+		return fmt.Errorf("asignar reembolso a la sesión abierta del local: Odoo no aceptó la sesión activa")
+	}
+	return nil
 }
 
 func (c *Client) fetchOrderRefundSnapshot(orderID int64) (posOrderRefundSnapshot, error) {
@@ -391,9 +411,16 @@ func (c *Client) fetchPOSConfigRefundSnapshot(configID int64) (posConfigRefundSn
 }
 
 func (c *Client) fetchPOSSessionRefundSnapshot(sessionID int64) (posSessionRefundSnapshot, error) {
+	fieldsMeta, _ := c.fetchModelFieldsMeta("pos.session")
+	fields := selectExistingFields(fieldsMeta, []string{"id", "name", "state", "config_id", "update_stock_at_closing"})
+	if len(fields) == 0 {
+		fields = []string{"id", "name", "state", "config_id"}
+	}
+	_, hasUpdateStock := fieldsMeta["update_stock_at_closing"]
+
 	rawRows, err := c.callOdoo("pos.session", "search_read", []interface{}{}, map[string]interface{}{
 		"domain": []any{[]any{"id", "=", sessionID}},
-		"fields": []string{"id", "name", "state", "config_id"},
+		"fields": fields,
 		"limit":  1,
 	})
 	if err != nil {
@@ -411,9 +438,150 @@ func (c *Client) fetchPOSSessionRefundSnapshot(sessionID int64) (posSessionRefun
 	configID, _ := extractMany2One(row["config_id"])
 
 	return posSessionRefundSnapshot{
-		ID:       asInt64(row["id"]),
-		Name:     asString(row["name"]),
-		State:    asString(row["state"]),
-		ConfigID: configID,
+		ID:                   asInt64(row["id"]),
+		Name:                 asString(row["name"]),
+		State:                asString(row["state"]),
+		ConfigID:             configID,
+		UpdateStockAtClosing: asBool(row["update_stock_at_closing"]),
+		HasUpdateStockField:  hasUpdateStock,
 	}, nil
+}
+
+func (c *Client) processRefundStock(refundOrderID int64, session posSessionRefundSnapshot, requiresRealtimePicking bool, canCallPrivate bool) (bool, error) {
+	hasStockableLines, err := c.posOrderHasStockableLines(refundOrderID)
+	if err != nil {
+		return false, fmt.Errorf("validar productos de stock del reembolso: %w", err)
+	}
+	if !hasStockableLines {
+		return false, nil
+	}
+
+	if session.HasUpdateStockField && session.UpdateStockAtClosing {
+		before, _ := c.countPickings([]any{[]any{"pos_session_id", "=", session.ID}, []any{"state", "=", "done"}})
+		if _, err := c.callOdoo("pos.session", "_create_picking_at_end_of_session", []interface{}{[]interface{}{session.ID}}, map[string]interface{}{}); err != nil {
+			return false, fmt.Errorf("actualizar inventario del reembolso al cierre de sesión: %w", err)
+		}
+		after, err := c.countPickings([]any{[]any{"pos_session_id", "=", session.ID}, []any{"state", "=", "done"}})
+		if err != nil {
+			return false, fmt.Errorf("verificar inventario del reembolso: %w", err)
+		}
+		if after <= before {
+			return false, fmt.Errorf("actualizar inventario del reembolso: Odoo no confirmó movimientos de stock")
+		}
+		if _, err := c.callOdoo("pos.session", "write", []interface{}{[]interface{}{session.ID}, map[string]interface{}{"update_stock_at_closing": false}}, map[string]interface{}{}); err != nil {
+			return false, fmt.Errorf("proteger inventario del reembolso contra duplicados al cierre: %w", err)
+		}
+		_, _ = c.callOdoo("pos.order", "_compute_total_cost_in_real_time", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{})
+		return true, nil
+	}
+
+	if done, _ := c.hasDonePickingForOrder(refundOrderID); done {
+		return true, nil
+	}
+
+	stockUpdated := false
+	if _, err := c.callOdoo("pos.order", "_create_order_picking", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{}); err == nil {
+		stockUpdated = true
+	} else if _, err2 := c.callOdoo("pos.order", "create_picking", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{}); err2 == nil {
+		stockUpdated = true
+	}
+
+	if stockUpdated {
+		done, err := c.hasDonePickingForOrder(refundOrderID)
+		if err != nil {
+			return false, fmt.Errorf("verificar inventario del reembolso: %w", err)
+		}
+		if done {
+			_, _ = c.callOdoo("pos.order", "_compute_total_cost_in_real_time", []interface{}{[]interface{}{refundOrderID}}, map[string]interface{}{})
+			return true, nil
+		}
+	}
+
+	if requiresRealtimePicking || canCallPrivate {
+		return false, fmt.Errorf("actualizar inventario del reembolso: Odoo no confirmó movimientos de stock")
+	}
+	return false, nil
+}
+
+func (c *Client) posOrderHasStockableLines(orderID int64) (bool, error) {
+	rawRows, err := c.callOdoo("pos.order.line", "search_read", []interface{}{}, map[string]interface{}{
+		"domain": []any{[]any{"order_id", "=", orderID}},
+		"fields": []string{"id", "product_id", "qty"},
+		"limit":  1000,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(rawRows, &rows); err != nil {
+		return false, err
+	}
+
+	productIDsSet := make(map[int64]struct{})
+	for _, row := range rows {
+		if math.Abs(asFloat(row["qty"])) <= 0.000001 {
+			continue
+		}
+		productID, _ := extractMany2One(row["product_id"])
+		if productID > 0 {
+			productIDsSet[productID] = struct{}{}
+		}
+	}
+	if len(productIDsSet) == 0 {
+		return false, nil
+	}
+
+	productIDs := make([]int64, 0, len(productIDsSet))
+	for id := range productIDsSet {
+		productIDs = append(productIDs, id)
+	}
+
+	rawProducts, err := c.callOdoo("product.product", "search_read", []interface{}{}, map[string]interface{}{
+		"domain": []any{[]any{"id", "in", toAnyInt64Slice(productIDs)}},
+		"fields": []string{"id", "type"},
+		"limit":  len(productIDs) + 20,
+	})
+	if err != nil {
+		return false, err
+	}
+
+	var products []map[string]any
+	if err := json.Unmarshal(rawProducts, &products); err != nil {
+		return false, err
+	}
+	for _, product := range products {
+		productType := strings.ToLower(strings.TrimSpace(asString(product["type"])))
+		if productType == "product" || productType == "consu" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Client) hasDonePickingForOrder(orderID int64) (bool, error) {
+	count, err := c.countPickings([]any{[]any{"pos_order_id", "=", orderID}, []any{"state", "=", "done"}})
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (c *Client) countPickings(domain []any) (int, error) {
+	rawCount, err := c.callOdoo("stock.picking", "search_count", []interface{}{domain}, map[string]interface{}{})
+	if err != nil {
+		return 0, err
+	}
+
+	var countInt int
+	if err := json.Unmarshal(rawCount, &countInt); err == nil {
+		return countInt, nil
+	}
+
+	var countFloat float64
+	if err := json.Unmarshal(rawCount, &countFloat); err == nil {
+		return int(countFloat), nil
+	}
+
+	return 0, fmt.Errorf("no se pudo interpretar search_count de stock.picking")
 }

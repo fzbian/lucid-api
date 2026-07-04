@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"atm/models"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -131,17 +132,45 @@ func GetFixedCosts(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	costs = normalizeFixedCostsForResponse(costs)
 	if pos != "" {
 		filtered := make([]models.BillingFixedCost, 0, len(costs))
 		for _, cost := range costs {
-			if normalizeBillingPOSName(cost.PosName) == pos {
-				cost.PosName = pos
+			if cost.PosName == pos {
 				filtered = append(filtered, cost)
 			}
 		}
 		costs = filtered
 	}
 	c.JSON(http.StatusOK, costs)
+}
+
+func normalizeFixedCostsForResponse(costs []models.BillingFixedCost) []models.BillingFixedCost {
+	result := make([]models.BillingFixedCost, 0, len(costs))
+	seen := make(map[string]int, len(costs))
+
+	for _, cost := range costs {
+		canonicalPos := normalizeBillingPOSName(cost.PosName)
+		if canonicalPos == "" {
+			continue
+		}
+		cost.PosName = canonicalPos
+
+		key := fmt.Sprintf("%s|%s|%.2f|%t",
+			strings.ToLower(canonicalPos),
+			strings.ToLower(strings.TrimSpace(cost.Name)),
+			cost.Amount,
+			cost.Active,
+		)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+
+		seen[key] = len(result)
+		result = append(result, cost)
+	}
+
+	return result
 }
 
 func CreateFixedCost(c *gin.Context) {

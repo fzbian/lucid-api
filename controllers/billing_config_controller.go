@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -122,15 +124,22 @@ func SaveBillingConfigs(c *gin.Context) {
 // ---- Fixed Costs CRUD ----
 
 func GetFixedCosts(c *gin.Context) {
-	pos := c.Query("pos")
+	pos := normalizeBillingPOSName(c.Query("pos"))
 	var costs []models.BillingFixedCost
 	q := DB.Order("sort_order, id")
-	if pos != "" {
-		q = q.Where("pos_name = ?", pos)
-	}
 	if err := q.Find(&costs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if pos != "" {
+		filtered := make([]models.BillingFixedCost, 0, len(costs))
+		for _, cost := range costs {
+			if normalizeBillingPOSName(cost.PosName) == pos {
+				cost.PosName = pos
+				filtered = append(filtered, cost)
+			}
+		}
+		costs = filtered
 	}
 	c.JSON(http.StatusOK, costs)
 }
@@ -145,6 +154,7 @@ func CreateFixedCost(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "pos_name y name son requeridos"})
 		return
 	}
+	fc.PosName = normalizeBillingPOSName(fc.PosName)
 	if err := DB.Create(&fc).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -191,4 +201,303 @@ func DeleteFixedCost(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// SyncBillingPOSAlias consolida datos guardados con un nombre antiguo de POS hacia el nombre actual.
+func SyncBillingPOSAlias(c *gin.Context) {
+	var body struct {
+		OldPosName     string `json:"old_pos_name" binding:"required"`
+		CurrentPosName string `json:"current_pos_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	oldPos := baseBillingPOSName(body.OldPosName)
+	currentPos := baseBillingPOSName(body.CurrentPosName)
+	if oldPos == "" || currentPos == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "old_pos_name y current_pos_name son requeridos"})
+		return
+	}
+	if strings.EqualFold(oldPos, currentPos) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "El nombre antiguo y el actual no pueden ser iguales"})
+		return
+	}
+
+	now := time.Now()
+	type syncCounts struct {
+		BillingConfigs           int64 `json:"billing_configs"`
+		BillingFixedCosts        int64 `json:"billing_fixed_costs"`
+		BillingFixedCostArchived int64 `json:"billing_fixed_costs_archived_duplicates"`
+		GastosLocales            int64 `json:"gastos_locales"`
+		BillingMonthlies         int64 `json:"billing_monthlies"`
+		EmployeePOSAssignments   int64 `json:"employee_pos_assignments"`
+		BillingNominaAssignments int64 `json:"billing_nomina_assignments"`
+		BillingGastoExclusions   int64 `json:"billing_gasto_exclusions"`
+	}
+	counts := syncCounts{}
+
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		alias := models.BillingPOSAlias{
+			OldPosName:     oldPos,
+			CurrentPosName: currentPos,
+			Active:         true,
+			LastSyncedAt:   &now,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "old_pos_name"}},
+			DoUpdates: clause.Assignments(map[string]interface{}{
+				"current_pos_name": currentPos,
+				"active":           true,
+				"last_synced_at":   &now,
+				"updated_at":       now,
+			}),
+		}).Create(&alias).Error; err != nil {
+			return err
+		}
+
+		if err := syncBillingConfigPOSName(tx, oldPos, currentPos, &counts.BillingConfigs); err != nil {
+			return err
+		}
+		if err := syncBillingFixedCostsPOSName(tx, oldPos, currentPos, &counts.BillingFixedCosts, &counts.BillingFixedCostArchived); err != nil {
+			return err
+		}
+		if result := tx.Model(&models.GastoLocal{}).Where("local = ?", oldPos).Update("local", currentPos); result.Error != nil {
+			return result.Error
+		} else {
+			counts.GastosLocales = result.RowsAffected
+		}
+		if err := syncBillingMonthliesPOSName(tx, oldPos, currentPos, &counts.BillingMonthlies); err != nil {
+			return err
+		}
+		if err := syncEmployeePOSAssignmentsPOSName(tx, oldPos, currentPos, &counts.EmployeePOSAssignments); err != nil {
+			return err
+		}
+		if err := syncBillingNominaAssignmentsPOSName(tx, oldPos, currentPos, &counts.BillingNominaAssignments); err != nil {
+			return err
+		}
+		if err := syncBillingGastoExclusionsPOSName(tx, oldPos, currentPos, &counts.BillingGastoExclusions); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo sincronizar el POS", "detalle": err.Error()})
+		return
+	}
+
+	invalidateBillingPOSAliasCache()
+	c.JSON(http.StatusOK, gin.H{
+		"status":           "ok",
+		"old_pos_name":     oldPos,
+		"current_pos_name": currentPos,
+		"updated":          counts,
+	})
+}
+
+func syncBillingConfigPOSName(tx *gorm.DB, oldPos, currentPos string, count *int64) error {
+	var oldCfg models.BillingConfig
+	err := tx.Where("pos_name = ?", oldPos).First(&oldCfg).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var currentCfg models.BillingConfig
+	err = tx.Where("pos_name = ?", currentPos).First(&currentCfg).Error
+	if err == gorm.ErrRecordNotFound {
+		result := tx.Model(&models.BillingConfig{}).Where("id = ?", oldCfg.ID).Update("pos_name", currentPos)
+		*count += result.RowsAffected
+		return result.Error
+	}
+	if err != nil {
+		return err
+	}
+
+	updates := map[string]interface{}{}
+	if currentCfg.IncludeInReports == nil && oldCfg.IncludeInReports != nil {
+		updates["include_in_reports"] = *oldCfg.IncludeInReports
+	}
+	if currentCfg.Arriendo == 0 && oldCfg.Arriendo != 0 {
+		updates["arriendo"] = oldCfg.Arriendo
+	}
+	if currentCfg.Internet == 0 && oldCfg.Internet != 0 {
+		updates["internet"] = oldCfg.Internet
+	}
+	if currentCfg.Luz == 0 && oldCfg.Luz != 0 {
+		updates["luz"] = oldCfg.Luz
+	}
+	if !currentCfg.LuzAplica && oldCfg.LuzAplica {
+		updates["luz_aplica"] = oldCfg.LuzAplica
+	}
+	if currentCfg.Gas == 0 && oldCfg.Gas != 0 {
+		updates["gas"] = oldCfg.Gas
+	}
+	if !currentCfg.GasAplica && oldCfg.GasAplica {
+		updates["gas_aplica"] = oldCfg.GasAplica
+	}
+	if currentCfg.Agua == 0 && oldCfg.Agua != 0 {
+		updates["agua"] = oldCfg.Agua
+	}
+	if !currentCfg.AguaAplica && oldCfg.AguaAplica {
+		updates["agua_aplica"] = oldCfg.AguaAplica
+	}
+	if len(updates) > 0 {
+		if err := tx.Model(&currentCfg).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+
+	result := tx.Delete(&oldCfg)
+	*count += result.RowsAffected
+	return result.Error
+}
+
+func syncBillingFixedCostsPOSName(tx *gorm.DB, oldPos, currentPos string, updated, archived *int64) error {
+	var oldCosts []models.BillingFixedCost
+	if err := tx.Where("pos_name = ?", oldPos).Find(&oldCosts).Error; err != nil {
+		return err
+	}
+	for _, cost := range oldCosts {
+		var duplicate models.BillingFixedCost
+		err := tx.Where("pos_name = ? AND LOWER(name) = ? AND amount = ? AND active = ?",
+			currentPos, strings.ToLower(strings.TrimSpace(cost.Name)), cost.Amount, cost.Active).First(&duplicate).Error
+		if err == nil {
+			result := tx.Model(&cost).Updates(map[string]interface{}{"active": false, "sort_order": cost.SortOrder})
+			if result.Error != nil {
+				return result.Error
+			}
+			*archived += result.RowsAffected
+			continue
+		}
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		result := tx.Model(&cost).Update("pos_name", currentPos)
+		if result.Error != nil {
+			return result.Error
+		}
+		*updated += result.RowsAffected
+	}
+	return nil
+}
+
+func syncBillingMonthliesPOSName(tx *gorm.DB, oldPos, currentPos string, count *int64) error {
+	var oldRows []models.BillingMonthly
+	if err := tx.Where("pos_name = ?", oldPos).Find(&oldRows).Error; err != nil {
+		return err
+	}
+	for _, oldRow := range oldRows {
+		var currentRow models.BillingMonthly
+		err := tx.Where("pos_name = ? AND year = ? AND month = ?", currentPos, oldRow.Year, oldRow.Month).First(&currentRow).Error
+		if err == gorm.ErrRecordNotFound {
+			result := tx.Model(&oldRow).Update("pos_name", currentPos)
+			if result.Error != nil {
+				return result.Error
+			}
+			*count += result.RowsAffected
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		merged := mergeBillingMonthlyRow(currentRow, oldRow, currentPos)
+		if err := tx.Save(&merged).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&oldRow).Error; err != nil {
+			return err
+		}
+		*count++
+	}
+	return nil
+}
+
+func syncEmployeePOSAssignmentsPOSName(tx *gorm.DB, oldPos, currentPos string, count *int64) error {
+	var oldRows []models.EmployeePOSAssignment
+	if err := tx.Where("pos_name = ?", oldPos).Find(&oldRows).Error; err != nil {
+		return err
+	}
+	for _, oldRow := range oldRows {
+		var currentRow models.EmployeePOSAssignment
+		err := tx.Where("user_id = ? AND pos_name = ?", oldRow.UserID, currentPos).First(&currentRow).Error
+		if err == gorm.ErrRecordNotFound {
+			result := tx.Model(&oldRow).Update("pos_name", currentPos)
+			if result.Error != nil {
+				return result.Error
+			}
+			*count += result.RowsAffected
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		currentRow.CommissionPercentage += oldRow.CommissionPercentage
+		if err := tx.Save(&currentRow).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&oldRow).Error; err != nil {
+			return err
+		}
+		*count++
+	}
+	return nil
+}
+
+func syncBillingNominaAssignmentsPOSName(tx *gorm.DB, oldPos, currentPos string, count *int64) error {
+	var oldRows []models.BillingNominaAssignment
+	if err := tx.Where("pos_name = ?", oldPos).Find(&oldRows).Error; err != nil {
+		return err
+	}
+	for _, oldRow := range oldRows {
+		var currentRow models.BillingNominaAssignment
+		err := tx.Where("year = ? AND month = ? AND pos_name = ? AND payment_id = ?",
+			oldRow.Year, oldRow.Month, currentPos, oldRow.PaymentID).First(&currentRow).Error
+		if err == gorm.ErrRecordNotFound {
+			result := tx.Model(&oldRow).Update("pos_name", currentPos)
+			if result.Error != nil {
+				return result.Error
+			}
+			*count += result.RowsAffected
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := tx.Delete(&oldRow).Error; err != nil {
+			return err
+		}
+		*count++
+	}
+	return nil
+}
+
+func syncBillingGastoExclusionsPOSName(tx *gorm.DB, oldPos, currentPos string, count *int64) error {
+	var oldRows []models.BillingGastoExclusion
+	if err := tx.Where("local = ?", oldPos).Find(&oldRows).Error; err != nil {
+		return err
+	}
+	for _, oldRow := range oldRows {
+		var currentRow models.BillingGastoExclusion
+		err := tx.Where("year = ? AND month = ? AND local = ? AND fingerprint = ?",
+			oldRow.Year, oldRow.Month, currentPos, oldRow.Fingerprint).First(&currentRow).Error
+		if err == gorm.ErrRecordNotFound {
+			result := tx.Model(&oldRow).Update("local", currentPos)
+			if result.Error != nil {
+				return result.Error
+			}
+			*count += result.RowsAffected
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := tx.Delete(&oldRow).Error; err != nil {
+			return err
+		}
+		*count++
+	}
+	return nil
 }

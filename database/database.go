@@ -116,6 +116,7 @@ func Connect() (*gorm.DB, error) {
 			&models.NominaPeriodExclusion{},
 			&models.BillingMonthly{},
 			&models.BillingConfig{},
+			&models.BillingPOSAlias{},
 			&models.BillingFixedCost{},
 			&models.BillingGastoExclusion{},
 			&models.EmployeePOSAssignment{},
@@ -135,6 +136,10 @@ func Connect() (*gorm.DB, error) {
 		// Seeding (bloqueante para garantizar datos base al arrancar)
 		if err := Seed(db); err != nil {
 			return nil, fmt.Errorf("fallo seeding: %w", err)
+		}
+
+		if err := seedBillingPOSAliases(db); err != nil {
+			return nil, fmt.Errorf("fallo seeding aliases POS billing: %w", err)
 		}
 	}
 
@@ -213,6 +218,35 @@ func Seed(db *gorm.DB) error {
 			} else {
 				log.Println("[DB] Admin role updated with required views")
 			}
+		}
+	}
+
+	return nil
+}
+
+func seedBillingPOSAliases(db *gorm.DB) error {
+	defaultAliases := []models.BillingPOSAlias{
+		{OldPosName: "Titanium", CurrentPosName: "San Fason", Active: true},
+	}
+
+	for _, alias := range defaultAliases {
+		var existing models.BillingPOSAlias
+		err := db.Where("old_pos_name = ?", alias.OldPosName).First(&existing).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if err := db.Create(&alias).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		updates := map[string]interface{}{
+			"current_pos_name": alias.CurrentPosName,
+			"active":           alias.Active,
+		}
+		if err := db.Model(&existing).Updates(updates).Error; err != nil {
+			return err
 		}
 	}
 

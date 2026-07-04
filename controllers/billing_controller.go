@@ -211,11 +211,7 @@ func isPOSIncludedInReports(cfgMap map[string]models.BillingConfig, pos string) 
 // normalizeBillingPOSName unifica nombres de local/POS para cruces en billing.
 // Ej: "Bodega (Fabian Martin)" -> "Bodega"
 func normalizeBillingPOSName(name string) string {
-	clean := strings.TrimSpace(name)
-	if idx := strings.Index(clean, " ("); idx != -1 {
-		clean = clean[:idx]
-	}
-	return strings.TrimSpace(clean)
+	return resolveBillingPOSAlias(name, loadBillingPOSAliasMap())
 }
 
 type fixedCostTotals struct {
@@ -342,11 +338,24 @@ func getFixedCostTotalsByPOS() map[string]fixedCostTotals {
 	DB.Where("active = ?", true).Find(&costs)
 
 	result := make(map[string]fixedCostTotals)
+	seenCosts := make(map[string]struct{}, len(costs))
 	for _, c := range costs {
 		pos := normalizeBillingPOSName(c.PosName)
 		if pos == "" {
 			continue
 		}
+		// Si un local fue renombrado y quedaron costos idénticos en ambos nombres,
+		// se cuenta una sola vez para evitar duplicar gastos fijos.
+		dedupeKey := fmt.Sprintf("%s|%s|%.2f|%t",
+			strings.ToLower(pos),
+			strings.ToLower(strings.TrimSpace(c.Name)),
+			c.Amount,
+			c.Active,
+		)
+		if _, exists := seenCosts[dedupeKey]; exists {
+			continue
+		}
+		seenCosts[dedupeKey] = struct{}{}
 		totals := result[pos]
 		name := strings.ToLower(strings.TrimSpace(c.Name))
 		if strings.Contains(name, "arriendo") {
@@ -501,8 +510,12 @@ func GetNominaByPOS(c *gin.Context) {
 		if !found {
 			continue
 		}
+		posName := normalizeBillingPOSName(a.PosName)
+		if posName == "" {
+			continue
+		}
 		billingAmount := billingNominaAmount(p)
-		key := posUserKey{a.PosName, a.UserID}
+		key := posUserKey{posName, a.UserID}
 		emp, exists := empAgg[key]
 		if !exists {
 			name := p.User.Name
@@ -521,10 +534,10 @@ func GetNominaByPOS(c *gin.Context) {
 		emp.TotalPaid += billingAmount
 		emp.Count++
 
-		if posAgg[a.PosName] == nil {
-			posAgg[a.PosName] = &posNomina{}
+		if posAgg[posName] == nil {
+			posAgg[posName] = &posNomina{}
 		}
-		posAgg[a.PosName].Total += billingAmount
+		posAgg[posName].Total += billingAmount
 	}
 
 	result := make(map[string]posNomina)
@@ -577,7 +590,7 @@ func GetAvailableNominaPayments(c *gin.Context) {
 
 	assignedUserIDs := make(map[uint]string) // user_id -> pos_name
 	for _, a := range assigned {
-		assignedUserIDs[a.UserID] = a.PosName
+		assignedUserIDs[a.UserID] = normalizeBillingPOSName(a.PosName)
 	}
 
 	// Agrupar por user_id: sumar el valor de informe de todas las quincenas
@@ -651,6 +664,7 @@ func AssignNominaToPOS(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	input.PosName = normalizeBillingPOSName(input.PosName)
 
 	// Verificar que este empleado no esté ya asignado a otro POS este mes
 	var existing models.BillingNominaAssignment
@@ -766,6 +780,8 @@ func GetBillingMonthly(c *gin.Context) {
 	if err != nil {
 		fmt.Printf("[billing] error obteniendo ventas/margen Odoo: %v\n", err)
 	}
+	ventas = canonicalizeBillingMetricMap(ventas)
+	margenOdoo = canonicalizeBillingMetricMap(margenOdoo)
 
 	// Gastos/margen guardados
 	var rows []models.BillingMonthly
@@ -889,7 +905,13 @@ func GetBillingMonthly(c *gin.Context) {
 	rowKey := func(pos string, y, m int) string { return fmt.Sprintf("%s-%d-%d", pos, y, m) }
 	rowMap := make(map[string]models.BillingMonthly)
 	for _, r := range rows {
-		rowMap[rowKey(normalizeBillingPOSName(r.PosName), r.Year, r.Month)] = r
+		pos := normalizeBillingPOSName(r.PosName)
+		key := rowKey(pos, r.Year, r.Month)
+		if existing, exists := rowMap[key]; exists {
+			rowMap[key] = mergeBillingMonthlyRow(existing, r, pos)
+			continue
+		}
+		rowMap[key] = r
 	}
 
 	// gather all pos/month present either in ventas or rows
@@ -900,7 +922,7 @@ func GetBillingMonthly(c *gin.Context) {
 			if month > 0 && mn != month {
 				continue
 			}
-			posMonths[rowKey(pos, year, mn)] = struct{}{}
+			posMonths[rowKey(normalizeBillingPOSName(pos), year, mn)] = struct{}{}
 		}
 	}
 	for _, r := range rows {
@@ -1077,6 +1099,8 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	if err != nil {
 		fmt.Printf("[billing] error obteniendo ventas/margen Odoo: %v\n", err)
 	}
+	ventas = canonicalizeBillingMetricMap(ventas)
+	margenOdoo = canonicalizeBillingMetricMap(margenOdoo)
 
 	getVenta := func(pos string) float64 {
 		if ventas == nil {
@@ -1135,7 +1159,12 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	DB.Where("year = ? AND month = ?", body.Year, body.Month).Find(&existingRows)
 	rowMap := make(map[string]models.BillingMonthly, len(existingRows))
 	for _, row := range existingRows {
-		rowMap[normalizeBillingPOSName(row.PosName)] = row
+		pos := normalizeBillingPOSName(row.PosName)
+		if existing, exists := rowMap[pos]; exists {
+			rowMap[pos] = mergeBillingMonthlyRow(existing, row, pos)
+			continue
+		}
+		rowMap[pos] = row
 	}
 
 	// Recolectar todos los POS
@@ -1144,7 +1173,7 @@ func ConfirmBillingMonthly(c *gin.Context) {
 		for pos, months := range ventas {
 			for label := range months {
 				if monthNumberFromLabel(label) == body.Month {
-					allPOS[pos] = struct{}{}
+					allPOS[normalizeBillingPOSName(pos)] = struct{}{}
 				}
 			}
 		}
@@ -1335,12 +1364,29 @@ func GetEmployeeCommission(c *gin.Context) {
 	posNames := make([]string, 0, len(assignments))
 	assignMap := make(map[string]float64)
 	for _, a := range assignments {
-		posNames = append(posNames, a.PosName)
-		assignMap[a.PosName] = a.CommissionPercentage
+		pos := normalizeBillingPOSName(a.PosName)
+		if pos == "" {
+			continue
+		}
+		posNames = append(posNames, pos)
+		assignMap[pos] += a.CommissionPercentage
 	}
 
-	var reports []models.BillingMonthly
-	DB.Where("pos_name IN ? AND year = ? AND month = ? AND confirmed = ?", posNames, year, month, true).Find(&reports)
+	var reportRows []models.BillingMonthly
+	DB.Where("year = ? AND month = ? AND confirmed = ?", year, month, true).Find(&reportRows)
+	reportPOSSet := make(map[string]struct{}, len(posNames))
+	for _, pos := range posNames {
+		reportPOSSet[pos] = struct{}{}
+	}
+	reports := make([]models.BillingMonthly, 0, len(reportRows))
+	for _, report := range reportRows {
+		pos := normalizeBillingPOSName(report.PosName)
+		if _, ok := reportPOSSet[pos]; !ok {
+			continue
+		}
+		report.PosName = pos
+		reports = append(reports, report)
+	}
 
 	if len(reports) == 0 {
 		c.JSON(http.StatusOK, gin.H{"total": 0, "details": []interface{}{}, "confirmed": false})
@@ -1424,6 +1470,9 @@ func GetEmployeePOSAssignments(c *gin.Context) {
 	id := c.Param("id")
 	var assignments []models.EmployeePOSAssignment
 	DB.Where("user_id = ?", id).Find(&assignments)
+	for i := range assignments {
+		assignments[i].PosName = normalizeBillingPOSName(assignments[i].PosName)
+	}
 	c.JSON(http.StatusOK, assignments)
 }
 
@@ -1455,9 +1504,13 @@ func SaveEmployeePOSAssignments(c *gin.Context) {
 		if a.PosName == "" {
 			continue
 		}
+		posName := normalizeBillingPOSName(a.PosName)
+		if posName == "" {
+			continue
+		}
 		DB.Create(&models.EmployeePOSAssignment{
 			UserID:               uint(userID),
-			PosName:              a.PosName,
+			PosName:              posName,
 			CommissionPercentage: a.CommissionPercentage,
 		})
 	}
@@ -1472,6 +1525,9 @@ func SaveEmployeePOSAssignments(c *gin.Context) {
 func GetAllPOSAssignments(c *gin.Context) {
 	var assignments []models.EmployeePOSAssignment
 	DB.Find(&assignments)
+	for i := range assignments {
+		assignments[i].PosName = normalizeBillingPOSName(assignments[i].PosName)
+	}
 	c.JSON(http.StatusOK, assignments)
 }
 
@@ -1532,7 +1588,7 @@ func CreateBillingGasto(c *gin.Context) {
 
 	fecha := time.Date(body.Year, time.Month(body.Month), 1, 0, 0, 0, 0, time.Local)
 	gasto := models.GastoLocal{
-		Local:   body.Pos,
+		Local:   normalizeBillingPOSName(body.Pos),
 		Fecha:   fecha,
 		Tipo:    "GASTO_COMUN",
 		Motivo:  body.Motivo,

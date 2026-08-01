@@ -3,8 +3,7 @@ package controllers
 import (
 	"atm/models"
 	"atm/odoo"
-	"context"
-	"os"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -28,13 +27,14 @@ func getAllBillingPOSConfigsFromOdoo(forceRefresh bool) ([]odoo.POSConfigRef, er
 	if forceRefresh {
 		odoo.InvalidatePOSConfigCache()
 	}
-	configs, err := odoo.ListPOSConfigs(
-		context.Background(),
-		os.Getenv("ODOO_URL"),
-		os.Getenv("ODOO_DB"),
-		os.Getenv("ODOO_USER"),
-		os.Getenv("ODOO_PASSWORD"),
-	)
+	client, err := odoo.NewFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if err := client.Authenticate(); err != nil {
+		return nil, fmt.Errorf("autenticación Odoo: %w", err)
+	}
+	configs, err := client.ListPOSConfigRefs()
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +87,9 @@ func loadBillingPOSSelection(forceRefresh, requireOdoo bool) (billingPOSSelectio
 	odooConfigs, odooErr := getAllBillingPOSConfigsFromOdoo(forceRefresh)
 	if odooErr != nil && requireOdoo {
 		return billingPOSSelection{}, odooErr
+	}
+	if odooErr == nil && len(odooConfigs) == 0 && requireOdoo {
+		return billingPOSSelection{}, fmt.Errorf("Odoo respondió correctamente pero no devolvió registros de pos.config")
 	}
 
 	var configs []models.BillingConfig

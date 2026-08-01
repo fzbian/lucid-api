@@ -512,18 +512,44 @@ func (c *Client) GetPOSSessions(posID int, start, end time.Time) ([]POSSessionSh
 
 }
 
-func (c *Client) ListPOSConfigs() ([]map[string]any, error) {
-	// Simple list of ID, Name for selection
+// ListPOSConfigRefs devuelve la identidad estable y el nombre actual de cada POS.
+func (c *Client) ListPOSConfigRefs() ([]POSConfigRef, error) {
 	domain := []any{}
 	fields := []string{"id", "name"}
-	kwargs := map[string]any{"domain": domain, "fields": fields}
+	kwargs := map[string]any{"domain": domain, "fields": fields, "limit": 10000, "order": "id asc"}
 
 	raw, err := c.callOdoo("pos.config", "search_read", []any{}, kwargs)
 	if err != nil {
 		return nil, err
 	}
 
-	var res []map[string]any
-	json.Unmarshal(raw, &res)
-	return res, nil
+	var rows []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("pos.config decode: %w", err)
+	}
+
+	refs := make([]POSConfigRef, 0, len(rows))
+	for _, row := range rows {
+		name := strings.TrimSpace(row.Name)
+		if row.ID <= 0 || name == "" {
+			continue
+		}
+		refs = append(refs, POSConfigRef{ID: row.ID, Name: name})
+	}
+	return refs, nil
+}
+
+func (c *Client) ListPOSConfigs() ([]map[string]any, error) {
+	refs, err := c.ListPOSConfigRefs()
+	if err != nil {
+		return nil, err
+	}
+	configs := make([]map[string]any, 0, len(refs))
+	for _, ref := range refs {
+		configs = append(configs, map[string]any{"id": ref.ID, "name": ref.Name})
+	}
+	return configs, nil
 }

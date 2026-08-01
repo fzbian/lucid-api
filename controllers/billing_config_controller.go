@@ -28,6 +28,8 @@ type billingConfigEntry struct {
 	AguaAplica       bool    `json:"agua_aplica"`
 }
 
+const billingReportCatalogVersion = "2026-07-31-eight-pos-v1"
+
 func GetBillingConfigs(c *gin.Context) {
 	forceRefresh := c.Query("refresh") == "1" || strings.EqualFold(c.Query("refresh"), "true")
 	requireOdoo := c.Query("require_odoo") == "1" || strings.EqualFold(c.Query("require_odoo"), "true")
@@ -41,7 +43,128 @@ func GetBillingConfigs(c *gin.Context) {
 		return
 	}
 	c.Header("X-Billing-POS-Source", selection.Source)
+	c.Header("X-Billing-Catalog-Version", billingReportCatalogVersion)
+	c.Header("X-Billing-Catalog-Count", strconv.Itoa(len(billingReportPOSCatalog)))
 	c.JSON(http.StatusOK, selection.Configs)
+}
+
+func GetBillingConfigDiagnostics(c *gin.Context) {
+	type databaseConfigRow struct {
+		ID               uint   `json:"id"`
+		OdooPOSID        *int64 `json:"odoo_pos_id"`
+		PosName          string `json:"pos_name"`
+		IncludeInReports *bool  `json:"include_in_reports"`
+	}
+
+	odooConfigs, odooErr := getAllBillingPOSConfigsFromOdoo(true)
+	tableExists := DB.Migrator().HasTable(&models.BillingConfig{})
+	odooIDColumnExists := tableExists && DB.Migrator().HasColumn(&models.BillingConfig{}, "OdooPOSID")
+	dbQueryOK := false
+	dbQueryError := ""
+	dbRows := make([]databaseConfigRow, 0)
+	if tableExists {
+		columns := "id, pos_name, include_in_reports"
+		if odooIDColumnExists {
+			columns += ", odoo_pos_id"
+		}
+		if err := DB.Table(models.BillingConfig{}.TableName()).Select(columns).Order("id asc").Scan(&dbRows).Error; err != nil {
+			dbQueryError = err.Error()
+		} else {
+			dbQueryOK = true
+		}
+	} else {
+		dbQueryError = "tabla pos_billing_configs no existe"
+	}
+
+	selection, selectionErr := loadBillingPOSSelection(false, false)
+	resolvedNames := make([]string, 0)
+	resolvedConfigs := make([]models.BillingConfig, 0)
+	selectedNames := make([]string, 0)
+	selectionSource := ""
+	if selectionErr == nil {
+		resolvedConfigs = selection.Configs
+		selectedNames = selection.SelectedNames
+		selectionSource = selection.Source
+		for _, cfg := range selection.Configs {
+			resolvedNames = append(resolvedNames, cfg.PosName)
+		}
+	}
+
+	expectedByKey := make(map[string]string, len(billingReportPOSCatalog))
+	for _, name := range billingReportPOSCatalog {
+		expectedByKey[billingPOSKey(name)] = name
+	}
+	seenResolved := make(map[string]int, len(resolvedNames))
+	missingNames := make([]string, 0)
+	unexpectedNames := make([]string, 0)
+	duplicateNames := make([]string, 0)
+	withoutOdooID := make([]string, 0)
+	for _, cfg := range resolvedConfigs {
+		key := billingPOSKey(cfg.PosName)
+		seenResolved[key]++
+		if _, expected := expectedByKey[key]; !expected {
+			unexpectedNames = append(unexpectedNames, cfg.PosName)
+		}
+		if cfg.OdooPOSID == nil || *cfg.OdooPOSID <= 0 {
+			withoutOdooID = append(withoutOdooID, cfg.PosName)
+		}
+	}
+	for key, expectedName := range expectedByKey {
+		if seenResolved[key] == 0 {
+			missingNames = append(missingNames, expectedName)
+		} else if seenResolved[key] > 1 {
+			duplicateNames = append(duplicateNames, expectedName)
+		}
+	}
+	sort.Strings(missingNames)
+	sort.Strings(unexpectedNames)
+	sort.Strings(duplicateNames)
+	sort.Strings(withoutOdooID)
+
+	operational := selectionErr == nil && len(resolvedConfigs) == len(billingReportPOSCatalog) && len(missingNames) == 0 && len(unexpectedNames) == 0 && len(duplicateNames) == 0
+	odooError := ""
+	if odooErr != nil {
+		odooError = odooErr.Error()
+	}
+	selectionError := ""
+	if selectionErr != nil {
+		selectionError = selectionErr.Error()
+	}
+
+	c.Header("X-Billing-Catalog-Version", billingReportCatalogVersion)
+	c.JSON(http.StatusOK, gin.H{
+		"catalog_version":    billingReportCatalogVersion,
+		"expected_pos_names": billingReportPOSCatalog,
+		"operational":        operational,
+		"odoo": gin.H{
+			"ok":      odooErr == nil,
+			"count":   len(odooConfigs),
+			"configs": odooConfigs,
+			"error":   odooError,
+		},
+		"database": gin.H{
+			"table_exists":              tableExists,
+			"odoo_pos_id_column_exists": odooIDColumnExists,
+			"query_ok":                  dbQueryOK,
+			"count":                     len(dbRows),
+			"configs":                   dbRows,
+			"error":                     dbQueryError,
+		},
+		"selection": gin.H{
+			"ok":             selectionErr == nil,
+			"source":         selectionSource,
+			"count":          len(resolvedConfigs),
+			"configs":        resolvedConfigs,
+			"selected_names": selectedNames,
+			"error":          selectionError,
+		},
+		"validation": gin.H{
+			"missing_names":    missingNames,
+			"unexpected_names": unexpectedNames,
+			"duplicate_names":  duplicateNames,
+			"without_odoo_id":  withoutOdooID,
+		},
+	})
 }
 
 func SaveBillingConfigs(c *gin.Context) {
@@ -62,6 +185,7 @@ func SaveBillingConfigs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "El catálogo de informes está incompleto"})
 		return
 	}
+	hasOdooPOSIDColumn := DB.Migrator().HasColumn(&models.BillingConfig{}, "OdooPOSID")
 
 	currentByKey := make(map[string]models.BillingConfig, len(currentSelection.Configs))
 	for _, cfg := range currentSelection.Configs {
@@ -140,7 +264,11 @@ func SaveBillingConfigs(c *gin.Context) {
 				current.GasAplica = entry.GasAplica
 				current.Agua = entry.Agua
 				current.AguaAplica = entry.AguaAplica
-				if err := tx.Create(&current).Error; err != nil {
+				createTx := tx
+				if !hasOdooPOSIDColumn {
+					createTx = createTx.Omit("OdooPOSID")
+				}
+				if err := createTx.Create(&current).Error; err != nil {
 					return err
 				}
 				persisted = append(persisted, current)

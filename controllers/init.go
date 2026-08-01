@@ -98,6 +98,7 @@ func RegisterBillingRoutes(rg *gin.RouterGroup) {
 		r.POST("/gastos", CreateBillingGasto)
 		r.POST("/gastos/exclude", ExcludeBillingGasto)
 		r.GET("/configs", GetBillingConfigs)
+		r.GET("/configs/diagnostics", GetBillingConfigDiagnostics)
 		r.POST("/configs", SaveBillingConfigs)
 		r.POST("/pos-aliases/sync", SyncBillingPOSAlias)
 		r.GET("/fixed-costs", GetFixedCosts)

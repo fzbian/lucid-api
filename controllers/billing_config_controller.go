@@ -36,7 +36,17 @@ func GetBillingConfigs(c *gin.Context) {
 
 	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		// La configuración guardada sigue siendo útil durante una caída temporal de Odoo.
+		// Se devuelve normalizada para que el frontend no restaure un estado anterior.
+		normalizedCfgs := make([]models.BillingConfig, 0, len(cfgs))
+		for _, cfg := range buildBillingConfigMap(cfgs) {
+			normalizedCfgs = append(normalizedCfgs, cfg)
+		}
+		sort.Slice(normalizedCfgs, func(i, j int) bool {
+			return normalizedCfgs[i].PosName < normalizedCfgs[j].PosName
+		})
+		c.Header("X-Billing-POS-Source", "saved-config-fallback")
+		c.JSON(http.StatusOK, normalizedCfgs)
 		return
 	}
 
@@ -65,10 +75,28 @@ func SaveBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	toSave := make([]models.BillingConfig, 0, len(body.Entries))
+	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "No se pudo validar los puntos de venta con Odoo", "detalle": err.Error()})
+		return
+	}
+	odooNamesByKey := billingPOSNameMap(odooPOSNames)
+	if len(odooNamesByKey) == 0 {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "Odoo no devolvió puntos de venta para configurar"})
+		return
+	}
+
+	toSaveByKey := make(map[string]models.BillingConfig, len(body.Entries))
+	orderedKeys := make([]string, 0, len(body.Entries))
+	invalidPOSNames := make([]string, 0)
 	for _, e := range body.Entries {
-		posName := normalizeBillingPOSName(e.PosName)
-		if posName == "" {
+		key := billingPOSKey(e.PosName)
+		if key == "" {
+			continue
+		}
+		posName, existsInOdoo := odooNamesByKey[key]
+		if !existsInOdoo {
+			invalidPOSNames = append(invalidPOSNames, strings.TrimSpace(e.PosName))
 			continue
 		}
 		includeInReports := true
@@ -87,7 +115,24 @@ func SaveBillingConfigs(c *gin.Context) {
 			Agua:             e.Agua,
 			AguaAplica:       e.AguaAplica,
 		}
-		toSave = append(toSave, cfg)
+		if _, exists := toSaveByKey[key]; !exists {
+			orderedKeys = append(orderedKeys, key)
+		}
+		toSaveByKey[key] = cfg
+	}
+
+	if len(invalidPOSNames) > 0 {
+		sort.Strings(invalidPOSNames)
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":     "Hay puntos de venta que no existen actualmente en Odoo",
+			"pos_names": invalidPOSNames,
+		})
+		return
+	}
+
+	toSave := make([]models.BillingConfig, 0, len(orderedKeys))
+	for _, key := range orderedKeys {
+		toSave = append(toSave, toSaveByKey[key])
 	}
 
 	if len(toSave) == 0 {
@@ -108,16 +153,23 @@ func SaveBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave)})
+	var savedConfigs []models.BillingConfig
+	if err := DB.Find(&savedConfigs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	merged, _ := mergeBillingConfigsWithPOSNames(savedConfigs, odooPOSNames)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave), "configs": merged})
 }
 
 func saveBillingConfigByPOS(tx *gorm.DB, cfg models.BillingConfig) error {
 	var existing []models.BillingConfig
-	if err := tx.Where("pos_name = ?", cfg.PosName).Order("id asc").Find(&existing).Error; err != nil {
+	if err := tx.Where("LOWER(TRIM(pos_name)) = ?", billingPOSKey(cfg.PosName)).Order("id asc").Find(&existing).Error; err != nil {
 		return err
 	}
 
 	updates := map[string]interface{}{
+		"pos_name":           cfg.PosName,
 		"include_in_reports": *cfg.IncludeInReports,
 		"arriendo":           cfg.Arriendo,
 		"internet":           cfg.Internet,

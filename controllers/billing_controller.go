@@ -201,7 +201,7 @@ func billingNominaAmount(payment models.NominaPayment) int64 {
 // isPOSIncludedInReports define si un POS debe incluirse en informes.
 // Solo se consideran los POS activos en la configuración actual de billing.
 func isPOSIncludedInReports(cfgMap map[string]models.BillingConfig, pos string) bool {
-	cfg, ok := cfgMap[normalizeBillingPOSName(pos)]
+	cfg, ok := findBillingConfig(cfgMap, pos)
 	if !ok || cfg.IncludeInReports == nil {
 		return ok
 	}

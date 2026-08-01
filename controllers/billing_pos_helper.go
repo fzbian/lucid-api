@@ -40,15 +40,35 @@ func getAllBillingPOSNamesFromOdoo() ([]string, error) {
 		if normalized == "" {
 			continue
 		}
-		if _, exists := seen[normalized]; exists {
+		key := billingPOSKey(normalized)
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		seen[normalized] = struct{}{}
+		seen[key] = struct{}{}
 		out = append(out, normalized)
 	}
 
 	sort.Strings(out)
 	return out, nil
+}
+
+func billingPOSKey(name string) string {
+	return strings.ToLower(normalizeBillingPOSName(name))
+}
+
+func billingPOSNameMap(posNames []string) map[string]string {
+	result := make(map[string]string, len(posNames))
+	for _, posName := range posNames {
+		normalized := normalizeBillingPOSName(posName)
+		key := billingPOSKey(normalized)
+		if key == "" {
+			continue
+		}
+		if _, exists := result[key]; !exists {
+			result[key] = normalized
+		}
+	}
+	return result
 }
 
 func baseBillingPOSName(name string) string {
@@ -133,29 +153,50 @@ func resolveBillingPOSAlias(name string, aliases map[string]string) string {
 }
 
 func buildBillingConfigMap(cfgs []models.BillingConfig) map[string]models.BillingConfig {
-	cfgMap := make(map[string]models.BillingConfig, len(cfgs))
+	cfgByKey := make(map[string]models.BillingConfig, len(cfgs))
 	cfgIsCurrent := make(map[string]bool, len(cfgs))
 	for _, cfg := range cfgs {
 		originalPosName := baseBillingPOSName(cfg.PosName)
 		canonicalPosName := normalizeBillingPOSName(cfg.PosName)
-		if canonicalPosName == "" {
+		key := billingPOSKey(canonicalPosName)
+		if key == "" {
 			continue
 		}
-		isCurrentName := originalPosName == canonicalPosName
+		isCurrentName := strings.EqualFold(originalPosName, canonicalPosName)
 		cfg.PosName = canonicalPosName
-		if existing, exists := cfgMap[canonicalPosName]; exists {
+		if existing, exists := cfgByKey[key]; exists {
 			// Si existen la configuración antigua y la actual, mantener la actual.
-			if cfgIsCurrent[canonicalPosName] || !isCurrentName {
-				if cfgIsCurrent[canonicalPosName] == isCurrentName && cfg.UpdatedAt.After(existing.UpdatedAt) {
-					cfgMap[canonicalPosName] = cfg
+			if cfgIsCurrent[key] || !isCurrentName {
+				if cfgIsCurrent[key] == isCurrentName && cfg.UpdatedAt.After(existing.UpdatedAt) {
+					cfgByKey[key] = cfg
 				}
 				continue
 			}
 		}
-		cfgMap[canonicalPosName] = cfg
-		cfgIsCurrent[canonicalPosName] = isCurrentName
+		cfgByKey[key] = cfg
+		cfgIsCurrent[key] = isCurrentName
+	}
+
+	cfgMap := make(map[string]models.BillingConfig, len(cfgByKey))
+	for _, cfg := range cfgByKey {
+		cfgMap[cfg.PosName] = cfg
 	}
 	return cfgMap
+}
+
+func findBillingConfig(cfgMap map[string]models.BillingConfig, posName string) (models.BillingConfig, bool) {
+	normalized := normalizeBillingPOSName(posName)
+	if cfg, ok := cfgMap[normalized]; ok {
+		return cfg, true
+	}
+
+	key := billingPOSKey(normalized)
+	for candidateName, cfg := range cfgMap {
+		if billingPOSKey(candidateName) == key {
+			return cfg, true
+		}
+	}
+	return models.BillingConfig{}, false
 }
 
 func mergeBillingMonthlyRow(existing, incoming models.BillingMonthly, canonicalPosName string) models.BillingMonthly {
@@ -233,20 +274,29 @@ func mergeBillingConfigsWithPOSNames(cfgs []models.BillingConfig, posNames []str
 	cfgByPos := buildBillingConfigMap(cfgs)
 	merged := make([]models.BillingConfig, 0, len(posNames))
 	mergedMap := make(map[string]models.BillingConfig, len(posNames))
+	seen := make(map[string]struct{}, len(posNames))
 
 	for _, pos := range posNames {
 		normalized := normalizeBillingPOSName(pos)
-		if normalized == "" {
+		key := billingPOSKey(normalized)
+		if key == "" {
 			continue
 		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 
-		cfg, ok := cfgByPos[normalized]
+		cfg, ok := findBillingConfig(cfgByPos, normalized)
 		if !ok {
 			includeInReports := true
 			cfg = models.BillingConfig{
 				PosName:          normalized,
 				IncludeInReports: &includeInReports,
 			}
+		} else {
+			// El nombre visible siempre debe ser el nombre vigente enviado por Odoo.
+			cfg.PosName = normalized
 		}
 
 		merged = append(merged, cfg)

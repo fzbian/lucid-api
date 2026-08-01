@@ -3,7 +3,6 @@ package controllers
 import (
 	"atm/models"
 	"atm/odoo"
-	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -21,20 +20,26 @@ var (
 
 var defaultBillingPOSAliases = map[string]string{
 	"titanium": "San Fason",
+	"medellín": "Medellin",
+	"san josé": "San Jose",
+}
+
+// billingReportPOSCatalog es el único catálogo visible en configuración e informes.
+// Los IDs de Odoo se adjuntan cuando están disponibles, pero una falla de esa
+// lectura no puede ocultar locales que forman parte del negocio.
+var billingReportPOSCatalog = []string{
+	"Bodega",
+	"Medellin",
+	"Platinum",
+	"Premium",
+	"San Fason",
+	"San Jose",
+	"Visto",
+	"Internet",
 }
 
 func getAllBillingPOSConfigsFromOdoo(forceRefresh bool) ([]odoo.POSConfigRef, error) {
-	if forceRefresh {
-		odoo.InvalidatePOSConfigCache()
-	}
-	client, err := odoo.NewFromEnv()
-	if err != nil {
-		return nil, err
-	}
-	if err := client.Authenticate(); err != nil {
-		return nil, fmt.Errorf("autenticación Odoo: %w", err)
-	}
-	configs, err := client.ListPOSConfigRefs()
+	configs, err := odoo.ListPOSConfigRefsFromEnv(forceRefresh)
 	if err != nil {
 		return nil, err
 	}
@@ -83,49 +88,34 @@ type billingPOSSelection struct {
 	Source            string
 }
 
-func loadBillingPOSSelection(forceRefresh, requireOdoo bool) (billingPOSSelection, error) {
+func loadBillingPOSSelection(forceRefresh, _ bool) (billingPOSSelection, error) {
 	odooConfigs, odooErr := getAllBillingPOSConfigsFromOdoo(forceRefresh)
-	if odooErr != nil && requireOdoo {
-		return billingPOSSelection{}, odooErr
-	}
-	if odooErr == nil && len(odooConfigs) == 0 && requireOdoo {
-		return billingPOSSelection{}, fmt.Errorf("Odoo respondió correctamente pero no devolvió registros de pos.config")
-	}
 
 	var configs []models.BillingConfig
+	var reconcileErr error
 	if odooErr == nil {
-		if err := DB.Transaction(func(tx *gorm.DB) error {
-			var err error
-			configs, err = reconcileBillingConfigsWithOdoo(tx, odooConfigs)
+		reconcileErr = DB.Transaction(func(tx *gorm.DB) error {
+			_, err := reconcileBillingConfigsWithOdoo(tx, odooConfigs)
 			return err
-		}); err != nil {
-			return billingPOSSelection{}, err
-		}
-	} else {
-		if err := DB.Find(&configs).Error; err != nil {
-			return billingPOSSelection{}, err
-		}
-		identified := make([]models.BillingConfig, 0, len(configs))
-		for _, cfg := range configs {
-			if cfg.OdooPOSID != nil {
-				identified = append(identified, cfg)
-			}
-		}
-		if len(identified) > 0 {
-			configs = billingConfigsFromMap(buildBillingConfigMap(identified))
-		} else {
-			configs = billingConfigsFromMap(buildBillingConfigMap(configs))
-		}
+		})
 	}
+	if err := DB.Find(&configs).Error; err != nil {
+		return billingPOSSelection{}, err
+	}
+	configs, _ = mergeBillingConfigsWithPOSNames(configs, billingReportPOSCatalog)
 
 	selection := billingPOSSelection{
 		Configs:           configs,
 		ConfigMap:         buildBillingConfigMap(configs),
 		SelectedNameByKey: make(map[string]string, len(configs)),
-		Source:            "odoo",
+		Source:            "catalog+odoo",
 	}
 	if odooErr != nil {
-		selection.Source = "saved-config-fallback"
+		selection.Source = "catalog+saved-config-fallback"
+	} else if len(odooConfigs) == 0 {
+		selection.Source = "catalog+empty-odoo-fallback"
+	} else if reconcileErr != nil {
+		selection.Source = "catalog+reconcile-error-fallback"
 	}
 	for _, cfg := range configs {
 		if cfg.IncludeInReports == nil || !*cfg.IncludeInReports {

@@ -514,6 +514,13 @@ func (c *Client) GetPOSSessions(posID int, start, end time.Time) ([]POSSessionSh
 
 // ListPOSConfigRefs devuelve la identidad estable y el nombre actual de cada POS.
 func (c *Client) ListPOSConfigRefs() ([]POSConfigRef, error) {
+	const cacheKey = "pos_config_refs_web"
+	if cached, ok := getCached(cacheKey); ok {
+		if refs, ok := cached.([]POSConfigRef); ok {
+			return append([]POSConfigRef(nil), refs...), nil
+		}
+	}
+
 	domain := []any{}
 	fields := []string{"id", "name"}
 	kwargs := map[string]any{"domain": domain, "fields": fields, "limit": 10000, "order": "id asc"}
@@ -539,7 +546,30 @@ func (c *Client) ListPOSConfigRefs() ([]POSConfigRef, error) {
 		}
 		refs = append(refs, POSConfigRef{ID: row.ID, Name: name})
 	}
+	setCache(cacheKey, append([]POSConfigRef(nil), refs...), 5*time.Minute)
 	return refs, nil
+}
+
+// ListPOSConfigRefsFromEnv evita autenticar nuevamente mientras exista una
+// lectura reciente y permite forzar sincronización desde la configuración.
+func ListPOSConfigRefsFromEnv(forceRefresh bool) ([]POSConfigRef, error) {
+	const cacheKey = "pos_config_refs_web"
+	if forceRefresh {
+		InvalidatePOSConfigCache()
+	} else if cached, ok := getCached(cacheKey); ok {
+		if refs, ok := cached.([]POSConfigRef); ok {
+			return append([]POSConfigRef(nil), refs...), nil
+		}
+	}
+
+	client, err := NewFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if err := client.Authenticate(); err != nil {
+		return nil, fmt.Errorf("autenticación Odoo: %w", err)
+	}
+	return client.ListPOSConfigRefs()
 }
 
 func (c *Client) ListPOSConfigs() ([]map[string]any, error) {

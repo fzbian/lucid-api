@@ -83,20 +83,62 @@ func TestAlignBillingMetricMapUsesOnlySelectedOdooPOS(t *testing.T) {
 	}
 }
 
-func TestVerifyBillingConfigSelectionUsesOdooID(t *testing.T) {
+func TestVerifyBillingConfigSelectionUsesCanonicalNameWithoutOdooID(t *testing.T) {
 	configs := []models.BillingConfig{
-		{OdooPOSID: int64Pointer(42), PosName: "Internet", IncludeInReports: boolPointer(true)},
+		{PosName: "Internet", IncludeInReports: boolPointer(true)},
 	}
-	expected := map[int64]billingConfigEntry{
-		42: {OdooPOSID: 42, PosName: "Internet", IncludeInReports: boolPointer(true)},
+	expected := map[string]billingConfigEntry{
+		billingPOSKey("Internet"): {PosName: "Internet", IncludeInReports: boolPointer(true)},
 	}
 	if err := verifyBillingConfigSelection(configs, expected); err != nil {
-		t.Fatalf("expected verified Odoo selection: %v", err)
+		t.Fatalf("expected verified canonical selection: %v", err)
 	}
 
 	configs[0].IncludeInReports = boolPointer(false)
 	if err := verifyBillingConfigSelection(configs, expected); err == nil {
 		t.Fatal("expected verification to detect an inclusion mismatch")
+	}
+}
+
+func TestBillingReportPOSCatalogContainsTheEightBusinessLocations(t *testing.T) {
+	expected := []string{"Bodega", "Medellin", "Platinum", "Premium", "San Fason", "San Jose", "Visto", "Internet"}
+	if len(billingReportPOSCatalog) != len(expected) {
+		t.Fatalf("expected %d report POS, got %d", len(expected), len(billingReportPOSCatalog))
+	}
+	for index, name := range expected {
+		if billingReportPOSCatalog[index] != name {
+			t.Fatalf("expected POS %q at index %d, got %q", name, index, billingReportPOSCatalog[index])
+		}
+	}
+}
+
+func TestBillingReportCatalogMergeAlwaysExposesInternetAndFiltersUnknownPOS(t *testing.T) {
+	configs := []models.BillingConfig{
+		{PosName: "Internet", IncludeInReports: boolPointer(false)},
+		{PosName: "Local de prueba", IncludeInReports: boolPointer(true)},
+	}
+	merged, cfgMap := mergeBillingConfigsWithPOSNames(configs, billingReportPOSCatalog)
+	if len(merged) != 8 {
+		t.Fatalf("expected the eight report POS, got %d", len(merged))
+	}
+	internet, found := findBillingConfig(cfgMap, "Internet")
+	if !found {
+		t.Fatal("expected Internet to remain available in the report catalog")
+	}
+	if internet.IncludeInReports == nil || *internet.IncludeInReports {
+		t.Fatal("expected the saved Internet selection to be preserved")
+	}
+	if _, found := findBillingConfig(cfgMap, "Local de prueba"); found {
+		t.Fatal("expected POS outside the report catalog to be filtered")
+	}
+}
+
+func TestBillingPOSAliasesNormalizeAccentedCatalogNames(t *testing.T) {
+	if billingPOSKey("Medellín") != billingPOSKey("Medellin") {
+		t.Fatal("expected Medellín to map to Medellin")
+	}
+	if billingPOSKey("San José") != billingPOSKey("San Jose") {
+		t.Fatal("expected San José to map to San Jose")
 	}
 }
 

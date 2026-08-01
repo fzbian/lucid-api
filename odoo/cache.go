@@ -64,4 +64,5 @@ func InvalidateBillingCache(year, month int) {
 func InvalidatePOSConfigCache() {
 	invalidateCache("pos_configs")
 	invalidateCache("pos_names")
+	invalidateCache("pos_config_refs_web")
 }

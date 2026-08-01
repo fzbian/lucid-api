@@ -66,8 +66,6 @@ func SaveBillingConfigs(c *gin.Context) {
 	}
 
 	toSave := make([]models.BillingConfig, 0, len(body.Entries))
-	submittedPOSNames := make([]string, 0, len(body.Entries))
-	submittedPOSSet := make(map[string]struct{}, len(body.Entries))
 	for _, e := range body.Entries {
 		posName := normalizeBillingPOSName(e.PosName)
 		if posName == "" {
@@ -90,10 +88,6 @@ func SaveBillingConfigs(c *gin.Context) {
 			AguaAplica:       e.AguaAplica,
 		}
 		toSave = append(toSave, cfg)
-		if _, exists := submittedPOSSet[posName]; !exists {
-			submittedPOSSet[posName] = struct{}{}
-			submittedPOSNames = append(submittedPOSNames, posName)
-		}
 	}
 
 	if len(toSave) == 0 {
@@ -102,15 +96,10 @@ func SaveBillingConfigs(c *gin.Context) {
 	}
 
 	if err := DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "pos_name"}},
-			DoUpdates: clause.AssignmentColumns([]string{"include_in_reports", "arriendo", "internet", "luz", "luz_aplica", "gas", "gas_aplica", "agua", "agua_aplica", "updated_at"}),
-		}).Create(&toSave).Error; err != nil {
-			return err
-		}
-
-		if err := tx.Where("pos_name NOT IN ?", submittedPOSNames).Delete(&models.BillingConfig{}).Error; err != nil {
-			return err
+		for _, cfg := range toSave {
+			if err := saveBillingConfigByPOS(tx, cfg); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -120,6 +109,45 @@ func SaveBillingConfigs(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave)})
+}
+
+func saveBillingConfigByPOS(tx *gorm.DB, cfg models.BillingConfig) error {
+	var existing []models.BillingConfig
+	if err := tx.Where("pos_name = ?", cfg.PosName).Order("id asc").Find(&existing).Error; err != nil {
+		return err
+	}
+
+	updates := map[string]interface{}{
+		"include_in_reports": *cfg.IncludeInReports,
+		"arriendo":           cfg.Arriendo,
+		"internet":           cfg.Internet,
+		"luz":                cfg.Luz,
+		"luz_aplica":         cfg.LuzAplica,
+		"gas":                cfg.Gas,
+		"gas_aplica":         cfg.GasAplica,
+		"agua":               cfg.Agua,
+		"agua_aplica":        cfg.AguaAplica,
+	}
+
+	if len(existing) == 0 {
+		return tx.Create(&cfg).Error
+	}
+
+	if err := tx.Model(&existing[0]).Updates(updates).Error; err != nil {
+		return err
+	}
+
+	if len(existing) > 1 {
+		duplicateIDs := make([]uint, 0, len(existing)-1)
+		for _, row := range existing[1:] {
+			duplicateIDs = append(duplicateIDs, row.ID)
+		}
+		if err := tx.Where("id IN ?", duplicateIDs).Delete(&models.BillingConfig{}).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // ---- Fixed Costs CRUD ----

@@ -144,9 +144,11 @@ func buildBillingConfigMap(cfgs []models.BillingConfig) map[string]models.Billin
 		isCurrentName := originalPosName == canonicalPosName
 		cfg.PosName = canonicalPosName
 		if existing, exists := cfgMap[canonicalPosName]; exists {
-			_ = existing
 			// Si existen la configuración antigua y la actual, mantener la actual.
 			if cfgIsCurrent[canonicalPosName] || !isCurrentName {
+				if cfgIsCurrent[canonicalPosName] == isCurrentName && cfg.UpdatedAt.After(existing.UpdatedAt) {
+					cfgMap[canonicalPosName] = cfg
+				}
 				continue
 			}
 		}
@@ -250,6 +252,10 @@ func mergeBillingConfigsWithPOSNames(cfgs []models.BillingConfig, posNames []str
 		merged = append(merged, cfg)
 		mergedMap[normalized] = cfg
 	}
+
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].PosName < merged[j].PosName
+	})
 
 	return merged, mergedMap
 }

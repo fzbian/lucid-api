@@ -940,6 +940,15 @@ func GetBillingMonthly(c *gin.Context) {
 			posMonths[rowKey(pos, year, m)] = struct{}{}
 		}
 	}
+	for pos := range cfgMap {
+		if month > 0 {
+			posMonths[rowKey(pos, year, month)] = struct{}{}
+			continue
+		}
+		for m := 1; m <= 12; m++ {
+			posMonths[rowKey(pos, year, m)] = struct{}{}
+		}
+	}
 	for pos := range fixedCostMap {
 		if month > 0 {
 			posMonths[rowKey(pos, year, month)] = struct{}{}

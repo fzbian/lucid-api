@@ -1497,6 +1497,7 @@ func RetiroCuenta(c *gin.Context) {
 
 // OdooGetBilling obtiene la facturación mensual por punto de venta
 func OdooGetBilling(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	yearStr := c.DefaultQuery("year", strconv.Itoa(time.Now().Year()))
 	year, err := strconv.Atoi(yearStr)
 	if err != nil {

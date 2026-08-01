@@ -758,6 +758,7 @@ func ResetNominaAssignmentsForMonth(c *gin.Context) {
 
 // GetBillingMonthly devuelve ventas Odoo + gastos/margen para un mes/año.
 func GetBillingMonthly(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	yearStr := c.DefaultQuery("year", strconv.Itoa(time.Now().Year()))
 	year, err := strconv.Atoi(yearStr)
 	if err != nil {

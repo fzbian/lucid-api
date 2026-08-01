@@ -31,6 +31,7 @@ type billingConfigEntry struct {
 const billingReportCatalogVersion = "2026-07-31-eight-pos-v1"
 
 func GetBillingConfigs(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	forceRefresh := c.Query("refresh") == "1" || strings.EqualFold(c.Query("refresh"), "true")
 	requireOdoo := c.Query("require_odoo") == "1" || strings.EqualFold(c.Query("require_odoo"), "true")
 	selection, err := loadBillingPOSSelection(forceRefresh, requireOdoo)
@@ -49,6 +50,7 @@ func GetBillingConfigs(c *gin.Context) {
 }
 
 func GetBillingConfigDiagnostics(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	type databaseConfigRow struct {
 		ID               uint   `json:"id"`
 		OdooPOSID        *int64 `json:"odoo_pos_id"`
@@ -168,6 +170,7 @@ func GetBillingConfigDiagnostics(c *gin.Context) {
 }
 
 func SaveBillingConfigs(c *gin.Context) {
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
 	var body struct {
 		Entries []billingConfigEntry `json:"entries" binding:"required"`
 	}

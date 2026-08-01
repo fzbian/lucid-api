@@ -5,7 +5,7 @@ import "time"
 // BillingPOSAlias vincula nombres antiguos de POS con el nombre actual.
 type BillingPOSAlias struct {
 	ID             uint       `json:"id" gorm:"primaryKey"`
-	OldPosName     string     `json:"old_pos_name" gorm:"size:191;uniqueIndex"`
+	OldPosName     string     `json:"old_pos_name" gorm:"size:191;uniqueIndex:idx_billing_pos_aliases_old_pos_name"`
 	CurrentPosName string     `json:"current_pos_name" gorm:"size:191;index"`
 	Active         bool       `json:"active" gorm:"default:true;index"`
 	LastSyncedAt   *time.Time `json:"last_synced_at"`

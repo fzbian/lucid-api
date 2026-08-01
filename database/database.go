@@ -115,7 +115,6 @@ func Connect() (*gorm.DB, error) {
 			&models.NominaPayment{},
 			&models.NominaPeriodExclusion{},
 			&models.BillingMonthly{},
-			&models.BillingPOSAlias{},
 			&models.BillingFixedCost{},
 			&models.BillingGastoExclusion{},
 			&models.EmployeePOSAssignment{},
@@ -130,6 +129,9 @@ func Connect() (*gorm.DB, error) {
 
 		if err := safeAutoMigrateBillingConfig(db); err != nil {
 			return nil, fmt.Errorf("fallo migracion automatica (billing config): %w", err)
+		}
+		if err := safeAutoMigrateBillingPOSAlias(db); err != nil {
+			return nil, fmt.Errorf("fallo migracion automatica (billing POS aliases): %w", err)
 		}
 
 		if err := safeAutoMigrateUsers(db); err != nil {
@@ -375,6 +377,92 @@ func safeAutoMigrateBillingConfig(db *gorm.DB) error {
 		return fmt.Errorf("creando índice único de odoo_pos_id: %w", err)
 	}
 	log.Printf("[DB] Índice único de %s.odoo_pos_id creado", table)
+	return nil
+}
+
+// safeAutoMigrateBillingPOSAlias evita que GORM intente eliminar el índice
+// UNIQUE histórico como una clave foránea. Solo agrega estructura faltante.
+func safeAutoMigrateBillingPOSAlias(db *gorm.DB) error {
+	model := &models.BillingPOSAlias{}
+	table := model.TableName()
+	if !db.Migrator().HasTable(model) {
+		return db.AutoMigrate(model)
+	}
+
+	columns := []string{
+		"OldPosName",
+		"CurrentPosName",
+		"Active",
+		"LastSyncedAt",
+		"CreatedAt",
+		"UpdatedAt",
+	}
+	for _, column := range columns {
+		if db.Migrator().HasColumn(model, column) {
+			continue
+		}
+		log.Printf("[DB] Agregando columna faltante %s.%s", table, column)
+		if err := db.Migrator().AddColumn(model, column); err != nil {
+			if !db.Migrator().HasColumn(model, column) {
+				return fmt.Errorf("agregando columna %s: %w", column, err)
+			}
+			log.Printf("[DB] La columna %s.%s fue creada por otra instancia", table, column)
+		}
+	}
+
+	hasUniqueIndex := func() (bool, error) {
+		var count int64
+		err := db.Raw(`
+			SELECT COUNT(*)
+			FROM information_schema.statistics AS candidate
+			WHERE candidate.table_schema = DATABASE()
+			  AND candidate.table_name = ?
+			  AND candidate.column_name = 'old_pos_name'
+			  AND candidate.non_unique = 0
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM information_schema.statistics AS sibling
+				WHERE sibling.table_schema = candidate.table_schema
+				  AND sibling.table_name = candidate.table_name
+				  AND sibling.index_name = candidate.index_name
+				  AND sibling.column_name <> candidate.column_name
+			  )`, table).Scan(&count).Error
+		return count > 0, err
+	}
+	uniqueIndexExists, err := hasUniqueIndex()
+	if err != nil {
+		return fmt.Errorf("verificando índice de old_pos_name: %w", err)
+	}
+	if uniqueIndexExists {
+		log.Printf("[DB] Índice único de %s.old_pos_name ya disponible", table)
+		return nil
+	}
+
+	var duplicateCount int64
+	if err := db.Raw(`
+		SELECT COUNT(*)
+		FROM (
+			SELECT old_pos_name
+			FROM billing_pos_aliases
+			WHERE old_pos_name IS NOT NULL
+			GROUP BY old_pos_name
+			HAVING COUNT(*) > 1
+		) AS duplicate_old_pos_names`).Scan(&duplicateCount).Error; err != nil {
+		return fmt.Errorf("verificando alias POS duplicados: %w", err)
+	}
+	if duplicateCount > 0 {
+		log.Printf("[DB] Warning: %d alias POS duplicado(s) en %s; se conservan los datos y se omite el índice único", duplicateCount, table)
+		return nil
+	}
+
+	if err := db.Exec("CREATE UNIQUE INDEX `idx_billing_pos_aliases_old_pos_name` ON `billing_pos_aliases` (`old_pos_name`)").Error; err != nil {
+		if exists, checkErr := hasUniqueIndex(); checkErr == nil && exists {
+			log.Printf("[DB] El índice único de %s.old_pos_name fue creado por otra instancia", table)
+			return nil
+		}
+		return fmt.Errorf("creando índice único de old_pos_name: %w", err)
+	}
+	log.Printf("[DB] Índice único de %s.old_pos_name creado", table)
 	return nil
 }
 

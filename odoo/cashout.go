@@ -177,13 +177,19 @@ func odooGetPOSByName(ctx context.Context, baseURL, db string, uid int, password
 	return recs[0], nil
 }
 
-// ListPOSNames devuelve la lista de nombres de POS configurados en Odoo (cache TTL: 5 min)
-func ListPOSNames(ctx context.Context, baseURL, db, user, password string) ([]string, error) {
+// POSConfigRef identifica de forma estable un punto de venta de Odoo.
+type POSConfigRef struct {
+	ID   int64  `json:"odoo_pos_id"`
+	Name string `json:"name"`
+}
+
+// ListPOSConfigs devuelve id y nombre de los POS configurados en Odoo (cache TTL: 5 min).
+func ListPOSConfigs(ctx context.Context, baseURL, db, user, password string) ([]POSConfigRef, error) {
 	// Check cache first (TTL: 5 min)
-	const cacheKey = "pos_names"
+	const cacheKey = "pos_configs"
 	if cached, ok := getCached(cacheKey); ok {
-		if names, ok := cached.([]string); ok {
-			return names, nil
+		if configs, ok := cached.([]POSConfigRef); ok {
+			return configs, nil
 		}
 	}
 
@@ -199,21 +205,38 @@ func ListPOSNames(ctx context.Context, baseURL, db, user, password string) ([]st
 		return nil, err
 	}
 	if len(ids) == 0 {
-		return []string{}, nil
+		return []POSConfigRef{}, nil
 	}
-	var recs []map[string]any
-	if err := odooExecuteKW(ctx, baseURL, db, uid, password, "pos.config", "read", []any{ids, []string{"name"}}, nil, &recs); err != nil {
+	var recs []struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := odooExecuteKW(ctx, baseURL, db, uid, password, "pos.config", "read", []any{ids, []string{"id", "name"}}, nil, &recs); err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(recs))
+	configs := make([]POSConfigRef, 0, len(recs))
 	for _, r := range recs {
-		if n, ok := r["name"].(string); ok && n != "" {
-			names = append(names, n)
+		if r.ID > 0 && strings.TrimSpace(r.Name) != "" {
+			configs = append(configs, POSConfigRef{ID: r.ID, Name: r.Name})
 		}
 	}
 
 	// Store in cache
-	setCache(cacheKey, names, 5*time.Minute)
+	setCache(cacheKey, configs, 5*time.Minute)
+	return configs, nil
+}
+
+// ListPOSNames mantiene compatibilidad con los consumidores que solo necesitan nombres.
+func ListPOSNames(ctx context.Context, baseURL, db, user, password string) ([]string, error) {
+	configs, err := ListPOSConfigs(ctx, baseURL, db, user, password)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(configs))
+	for _, config := range configs {
+		names = append(names, config.Name)
+	}
+	setCache("pos_names", names, 5*time.Minute)
 	return names, nil
 }
 

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -21,8 +24,11 @@ var defaultBillingPOSAliases = map[string]string{
 	"titanium": "San Fason",
 }
 
-func getAllBillingPOSNamesFromOdoo() ([]string, error) {
-	names, err := odoo.ListPOSNames(
+func getAllBillingPOSConfigsFromOdoo(forceRefresh bool) ([]odoo.POSConfigRef, error) {
+	if forceRefresh {
+		odoo.InvalidatePOSConfigCache()
+	}
+	configs, err := odoo.ListPOSConfigs(
 		context.Background(),
 		os.Getenv("ODOO_URL"),
 		os.Getenv("ODOO_DB"),
@@ -33,23 +39,246 @@ func getAllBillingPOSNamesFromOdoo() ([]string, error) {
 		return nil, err
 	}
 
-	seen := make(map[string]struct{}, len(names))
-	out := make([]string, 0, len(names))
-	for _, name := range names {
-		normalized := normalizeBillingPOSName(name)
-		if normalized == "" {
+	seenIDs := make(map[int64]struct{}, len(configs))
+	out := make([]odoo.POSConfigRef, 0, len(configs))
+	for _, config := range configs {
+		normalized := normalizeBillingPOSName(config.Name)
+		if config.ID <= 0 || normalized == "" {
 			continue
 		}
-		key := billingPOSKey(normalized)
-		if _, exists := seen[key]; exists {
+		if _, exists := seenIDs[config.ID]; exists {
 			continue
 		}
-		seen[key] = struct{}{}
-		out = append(out, normalized)
+		seenIDs[config.ID] = struct{}{}
+		out = append(out, odoo.POSConfigRef{ID: config.ID, Name: normalized})
 	}
 
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if strings.EqualFold(out[i].Name, out[j].Name) {
+			return out[i].ID < out[j].ID
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
 	return out, nil
+}
+
+func getAllBillingPOSNamesFromOdoo() ([]string, error) {
+	configs, err := getAllBillingPOSConfigsFromOdoo(false)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(configs))
+	for _, config := range configs {
+		names = append(names, config.Name)
+	}
+	return names, nil
+}
+
+type billingPOSSelection struct {
+	Configs           []models.BillingConfig
+	ConfigMap         map[string]models.BillingConfig
+	SelectedNames     []string
+	SelectedIDs       []int64
+	SelectedNameByKey map[string]string
+	Source            string
+}
+
+func loadBillingPOSSelection(forceRefresh, requireOdoo bool) (billingPOSSelection, error) {
+	odooConfigs, odooErr := getAllBillingPOSConfigsFromOdoo(forceRefresh)
+	if odooErr != nil && requireOdoo {
+		return billingPOSSelection{}, odooErr
+	}
+
+	var configs []models.BillingConfig
+	if odooErr == nil {
+		if err := DB.Transaction(func(tx *gorm.DB) error {
+			var err error
+			configs, err = reconcileBillingConfigsWithOdoo(tx, odooConfigs)
+			return err
+		}); err != nil {
+			return billingPOSSelection{}, err
+		}
+	} else {
+		if err := DB.Find(&configs).Error; err != nil {
+			return billingPOSSelection{}, err
+		}
+		identified := make([]models.BillingConfig, 0, len(configs))
+		for _, cfg := range configs {
+			if cfg.OdooPOSID != nil {
+				identified = append(identified, cfg)
+			}
+		}
+		if len(identified) > 0 {
+			configs = billingConfigsFromMap(buildBillingConfigMap(identified))
+		} else {
+			configs = billingConfigsFromMap(buildBillingConfigMap(configs))
+		}
+	}
+
+	selection := billingPOSSelection{
+		Configs:           configs,
+		ConfigMap:         buildBillingConfigMap(configs),
+		SelectedNameByKey: make(map[string]string, len(configs)),
+		Source:            "odoo",
+	}
+	if odooErr != nil {
+		selection.Source = "saved-config-fallback"
+	}
+	for _, cfg := range configs {
+		if cfg.IncludeInReports == nil || !*cfg.IncludeInReports {
+			continue
+		}
+		selection.SelectedNames = append(selection.SelectedNames, cfg.PosName)
+		selection.SelectedNameByKey[billingPOSKey(cfg.PosName)] = cfg.PosName
+		if cfg.OdooPOSID != nil {
+			selection.SelectedIDs = append(selection.SelectedIDs, *cfg.OdooPOSID)
+		}
+	}
+	return selection, nil
+}
+
+func (selection billingPOSSelection) selectedName(posName string) (string, bool) {
+	name, ok := selection.SelectedNameByKey[billingPOSKey(posName)]
+	return name, ok
+}
+
+func alignBillingMetricMapToSelection(values map[string]map[string]float64, selection billingPOSSelection) map[string]map[string]float64 {
+	result := make(map[string]map[string]float64, len(selection.SelectedNames))
+	for posName, months := range values {
+		selectedName, included := selection.selectedName(posName)
+		if !included {
+			continue
+		}
+		if result[selectedName] == nil {
+			result[selectedName] = make(map[string]float64, len(months))
+		}
+		for month, value := range months {
+			result[selectedName][month] += value
+		}
+	}
+	return result
+}
+
+func billingConfigsFromMap(cfgMap map[string]models.BillingConfig) []models.BillingConfig {
+	configs := make([]models.BillingConfig, 0, len(cfgMap))
+	for _, cfg := range cfgMap {
+		configs = append(configs, cfg)
+	}
+	sort.Slice(configs, func(i, j int) bool {
+		return strings.ToLower(configs[i].PosName) < strings.ToLower(configs[j].PosName)
+	})
+	return configs
+}
+
+func reconcileBillingConfigsWithOdoo(tx *gorm.DB, odooConfigs []odoo.POSConfigRef) ([]models.BillingConfig, error) {
+	var existing []models.BillingConfig
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Order("id asc").Find(&existing).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]models.BillingConfig, 0, len(odooConfigs))
+	consumed := make(map[uint]struct{})
+	for _, odooConfig := range odooConfigs {
+		candidateIndexes := make([]int, 0, 2)
+		bestIndex := -1
+		bestHasOdooID := false
+		bestHasCurrentName := false
+		for index, cfg := range existing {
+			if _, alreadyConsumed := consumed[cfg.ID]; alreadyConsumed {
+				continue
+			}
+			hasSameID := cfg.OdooPOSID != nil && *cfg.OdooPOSID == odooConfig.ID
+			isLegacyNameMatch := cfg.OdooPOSID == nil && billingPOSKey(cfg.PosName) == billingPOSKey(odooConfig.Name)
+			if !hasSameID && !isLegacyNameMatch {
+				continue
+			}
+			hasCurrentName := strings.EqualFold(baseBillingPOSName(cfg.PosName), odooConfig.Name)
+			candidateIndexes = append(candidateIndexes, index)
+			if bestIndex == -1 ||
+				(hasSameID && !bestHasOdooID) ||
+				(hasSameID == bestHasOdooID && hasCurrentName && !bestHasCurrentName) ||
+				(hasSameID == bestHasOdooID && hasCurrentName == bestHasCurrentName && cfg.UpdatedAt.After(existing[bestIndex].UpdatedAt)) {
+				bestIndex = index
+				bestHasOdooID = hasSameID
+				bestHasCurrentName = hasCurrentName
+			}
+		}
+
+		odooPOSID := odooConfig.ID
+		if bestIndex == -1 {
+			include := true
+			created := models.BillingConfig{
+				OdooPOSID:        &odooPOSID,
+				PosName:          odooConfig.Name,
+				IncludeInReports: &include,
+			}
+			if err := tx.Create(&created).Error; err != nil {
+				return nil, err
+			}
+			result = append(result, created)
+			continue
+		}
+
+		primary := existing[bestIndex]
+		for _, index := range candidateIndexes {
+			consumed[existing[index].ID] = struct{}{}
+			if index != bestIndex {
+				primary = mergeBillingConfigValues(primary, existing[index])
+			}
+		}
+		primary.OdooPOSID = &odooPOSID
+		primary.PosName = odooConfig.Name
+		if primary.IncludeInReports == nil {
+			include := true
+			primary.IncludeInReports = &include
+		}
+		if err := tx.Save(&primary).Error; err != nil {
+			return nil, err
+		}
+
+		duplicateIDs := make([]uint, 0, len(candidateIndexes)-1)
+		for _, index := range candidateIndexes {
+			if index != bestIndex {
+				duplicateIDs = append(duplicateIDs, existing[index].ID)
+			}
+		}
+		if len(duplicateIDs) > 0 {
+			if err := tx.Where("id IN ?", duplicateIDs).Delete(&models.BillingConfig{}).Error; err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, primary)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return strings.ToLower(result[i].PosName) < strings.ToLower(result[j].PosName)
+	})
+	return result, nil
+}
+
+func mergeBillingConfigValues(primary, duplicate models.BillingConfig) models.BillingConfig {
+	if primary.IncludeInReports == nil && duplicate.IncludeInReports != nil {
+		primary.IncludeInReports = duplicate.IncludeInReports
+	}
+	if primary.Arriendo == 0 {
+		primary.Arriendo = duplicate.Arriendo
+	}
+	if primary.Internet == 0 {
+		primary.Internet = duplicate.Internet
+	}
+	if primary.Luz == 0 {
+		primary.Luz = duplicate.Luz
+	}
+	if primary.Gas == 0 {
+		primary.Gas = duplicate.Gas
+	}
+	if primary.Agua == 0 {
+		primary.Agua = duplicate.Agua
+	}
+	primary.LuzAplica = primary.LuzAplica || duplicate.LuzAplica
+	primary.GasAplica = primary.GasAplica || duplicate.GasAplica
+	primary.AguaAplica = primary.AguaAplica || duplicate.AguaAplica
+	return primary
 }
 
 func billingPOSKey(name string) string {

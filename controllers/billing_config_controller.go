@@ -15,6 +15,7 @@ import (
 )
 
 type billingConfigEntry struct {
+	OdooPOSID        int64   `json:"odoo_pos_id" binding:"required,gt=0"`
 	PosName          string  `json:"pos_name" binding:"required"`
 	IncludeInReports *bool   `json:"include_in_reports"`
 	Arriendo         float64 `json:"arriendo"`
@@ -28,42 +29,19 @@ type billingConfigEntry struct {
 }
 
 func GetBillingConfigs(c *gin.Context) {
-	var cfgs []models.BillingConfig
-	if err := DB.Find(&cfgs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	forceRefresh := c.Query("refresh") == "1" || strings.EqualFold(c.Query("refresh"), "true")
+	requireOdoo := c.Query("require_odoo") == "1" || strings.EqualFold(c.Query("require_odoo"), "true")
+	selection, err := loadBillingPOSSelection(forceRefresh, requireOdoo)
 	if err != nil {
-		// La configuración guardada sigue siendo útil durante una caída temporal de Odoo.
-		// Se devuelve normalizada para que el frontend no restaure un estado anterior.
-		normalizedCfgs := make([]models.BillingConfig, 0, len(cfgs))
-		for _, cfg := range buildBillingConfigMap(cfgs) {
-			normalizedCfgs = append(normalizedCfgs, cfg)
+		status := http.StatusInternalServerError
+		if requireOdoo {
+			status = http.StatusBadGateway
 		}
-		sort.Slice(normalizedCfgs, func(i, j int) bool {
-			return normalizedCfgs[i].PosName < normalizedCfgs[j].PosName
-		})
-		c.Header("X-Billing-POS-Source", "saved-config-fallback")
-		c.JSON(http.StatusOK, normalizedCfgs)
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
-
-	if len(odooPOSNames) == 0 {
-		normalizedCfgs := make([]models.BillingConfig, 0, len(cfgs))
-		for _, cfg := range buildBillingConfigMap(cfgs) {
-			normalizedCfgs = append(normalizedCfgs, cfg)
-		}
-		sort.Slice(normalizedCfgs, func(i, j int) bool {
-			return normalizedCfgs[i].PosName < normalizedCfgs[j].PosName
-		})
-		c.JSON(http.StatusOK, normalizedCfgs)
-		return
-	}
-
-	merged, _ := mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
-	c.JSON(http.StatusOK, merged)
+	c.Header("X-Billing-POS-Source", selection.Source)
+	c.JSON(http.StatusOK, selection.Configs)
 }
 
 func SaveBillingConfigs(c *gin.Context) {
@@ -75,130 +53,147 @@ func SaveBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	currentSelection, err := loadBillingPOSSelection(true, true)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "No se pudo validar los puntos de venta con Odoo", "detalle": err.Error()})
 		return
 	}
-	odooNamesByKey := billingPOSNameMap(odooPOSNames)
-	if len(odooNamesByKey) == 0 {
+	if len(currentSelection.Configs) == 0 {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Odoo no devolvió puntos de venta para configurar"})
 		return
 	}
 
-	toSaveByKey := make(map[string]models.BillingConfig, len(body.Entries))
-	orderedKeys := make([]string, 0, len(body.Entries))
-	invalidPOSNames := make([]string, 0)
+	currentByID := make(map[int64]models.BillingConfig, len(currentSelection.Configs))
+	for _, cfg := range currentSelection.Configs {
+		if cfg.OdooPOSID != nil {
+			currentByID[*cfg.OdooPOSID] = cfg
+		}
+	}
+	entriesByID := make(map[int64]billingConfigEntry, len(body.Entries))
+	duplicateIDs := make([]int64, 0)
+	unknownIDs := make([]int64, 0)
 	for _, e := range body.Entries {
-		key := billingPOSKey(e.PosName)
-		if key == "" {
+		if _, duplicate := entriesByID[e.OdooPOSID]; duplicate {
+			duplicateIDs = append(duplicateIDs, e.OdooPOSID)
 			continue
 		}
-		posName, existsInOdoo := odooNamesByKey[key]
-		if !existsInOdoo {
-			invalidPOSNames = append(invalidPOSNames, strings.TrimSpace(e.PosName))
+		if _, existsInOdoo := currentByID[e.OdooPOSID]; !existsInOdoo {
+			unknownIDs = append(unknownIDs, e.OdooPOSID)
 			continue
 		}
-		includeInReports := true
-		if e.IncludeInReports != nil {
-			includeInReports = *e.IncludeInReports
-		}
-		cfg := models.BillingConfig{
-			PosName:          posName,
-			IncludeInReports: &includeInReports,
-			Arriendo:         e.Arriendo,
-			Internet:         e.Internet,
-			Luz:              e.Luz,
-			LuzAplica:        e.LuzAplica,
-			Gas:              e.Gas,
-			GasAplica:        e.GasAplica,
-			Agua:             e.Agua,
-			AguaAplica:       e.AguaAplica,
-		}
-		if _, exists := toSaveByKey[key]; !exists {
-			orderedKeys = append(orderedKeys, key)
-		}
-		toSaveByKey[key] = cfg
+		entriesByID[e.OdooPOSID] = e
 	}
 
-	if len(invalidPOSNames) > 0 {
-		sort.Strings(invalidPOSNames)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":     "Hay puntos de venta que no existen actualmente en Odoo",
-			"pos_names": invalidPOSNames,
+	missingIDs := make([]int64, 0)
+	for id := range currentByID {
+		if _, submitted := entriesByID[id]; !submitted {
+			missingIDs = append(missingIDs, id)
+		}
+	}
+	if len(duplicateIDs) > 0 || len(unknownIDs) > 0 || len(missingIDs) > 0 {
+		sort.Slice(duplicateIDs, func(i, j int) bool { return duplicateIDs[i] < duplicateIDs[j] })
+		sort.Slice(unknownIDs, func(i, j int) bool { return unknownIDs[i] < unknownIDs[j] })
+		sort.Slice(missingIDs, func(i, j int) bool { return missingIDs[i] < missingIDs[j] })
+		c.JSON(http.StatusConflict, gin.H{
+			"error":         "La lista de puntos de venta cambió en Odoo. Recarga la configuración y vuelve a guardar.",
+			"duplicate_ids": duplicateIDs,
+			"unknown_ids":   unknownIDs,
+			"missing_ids":   missingIDs,
+			"configs":       currentSelection.Configs,
 		})
 		return
 	}
 
-	toSave := make([]models.BillingConfig, 0, len(orderedKeys))
-	for _, key := range orderedKeys {
-		toSave = append(toSave, toSaveByKey[key])
-	}
-
-	if len(toSave) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no hay configuraciones válidas para guardar"})
-		return
-	}
-
 	if err := DB.Transaction(func(tx *gorm.DB) error {
-		for _, cfg := range toSave {
-			if err := saveBillingConfigByPOS(tx, cfg); err != nil {
+		ids := make([]int64, 0, len(currentByID))
+		for id := range currentByID {
+			ids = append(ids, id)
+		}
+		var locked []models.BillingConfig
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("odoo_pos_id IN ?", ids).Find(&locked).Error; err != nil {
+			return err
+		}
+		if len(locked) != len(currentByID) {
+			return fmt.Errorf("la configuración cambió durante el guardado: esperados=%d encontrados=%d", len(currentByID), len(locked))
+		}
+
+		for _, cfg := range locked {
+			if cfg.OdooPOSID == nil {
+				return fmt.Errorf("configuración %d sin identificador de Odoo", cfg.ID)
+			}
+			entry := entriesByID[*cfg.OdooPOSID]
+			include := entry.IncludeInReports == nil || *entry.IncludeInReports
+			current := currentByID[*cfg.OdooPOSID]
+			updates := map[string]interface{}{
+				"pos_name":           current.PosName,
+				"include_in_reports": include,
+				"arriendo":           entry.Arriendo,
+				"internet":           entry.Internet,
+				"luz":                entry.Luz,
+				"luz_aplica":         entry.LuzAplica,
+				"gas":                entry.Gas,
+				"gas_aplica":         entry.GasAplica,
+				"agua":               entry.Agua,
+				"agua_aplica":        entry.AguaAplica,
+			}
+			if err := tx.Model(&cfg).Updates(updates).Error; err != nil {
 				return err
 			}
 		}
 
-		return nil
+		var verified []models.BillingConfig
+		if err := tx.Where("odoo_pos_id IN ?", ids).Find(&verified).Error; err != nil {
+			return err
+		}
+		return verifyBillingConfigSelection(verified, entriesByID)
 	}); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	var savedConfigs []models.BillingConfig
-	if err := DB.Find(&savedConfigs).Error; err != nil {
+	verifiedSelection, err := loadBillingPOSSelection(false, true)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	merged, _ := mergeBillingConfigsWithPOSNames(savedConfigs, odooPOSNames)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "saved": len(toSave), "configs": merged})
+	if err := verifyBillingConfigSelection(verifiedSelection.Configs, entriesByID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "La configuración se guardó pero no superó la verificación final", "detalle": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":             "ok",
+		"saved":              len(entriesByID),
+		"verified":           true,
+		"configs":            verifiedSelection.Configs,
+		"selected_pos_ids":   verifiedSelection.SelectedIDs,
+		"selected_pos_names": verifiedSelection.SelectedNames,
+	})
 }
 
-func saveBillingConfigByPOS(tx *gorm.DB, cfg models.BillingConfig) error {
-	var existing []models.BillingConfig
-	if err := tx.Where("LOWER(TRIM(pos_name)) = ?", billingPOSKey(cfg.PosName)).Order("id asc").Find(&existing).Error; err != nil {
-		return err
+func verifyBillingConfigSelection(configs []models.BillingConfig, expected map[int64]billingConfigEntry) error {
+	if len(configs) != len(expected) {
+		return fmt.Errorf("cantidad distinta: esperados=%d encontrados=%d", len(expected), len(configs))
 	}
-
-	updates := map[string]interface{}{
-		"pos_name":           cfg.PosName,
-		"include_in_reports": *cfg.IncludeInReports,
-		"arriendo":           cfg.Arriendo,
-		"internet":           cfg.Internet,
-		"luz":                cfg.Luz,
-		"luz_aplica":         cfg.LuzAplica,
-		"gas":                cfg.Gas,
-		"gas_aplica":         cfg.GasAplica,
-		"agua":               cfg.Agua,
-		"agua_aplica":        cfg.AguaAplica,
-	}
-
-	if len(existing) == 0 {
-		return tx.Create(&cfg).Error
-	}
-
-	if err := tx.Model(&existing[0]).Updates(updates).Error; err != nil {
-		return err
-	}
-
-	if len(existing) > 1 {
-		duplicateIDs := make([]uint, 0, len(existing)-1)
-		for _, row := range existing[1:] {
-			duplicateIDs = append(duplicateIDs, row.ID)
+	seen := make(map[int64]struct{}, len(configs))
+	for _, cfg := range configs {
+		if cfg.OdooPOSID == nil {
+			return fmt.Errorf("configuración %d sin identificador de Odoo", cfg.ID)
 		}
-		if err := tx.Where("id IN ?", duplicateIDs).Delete(&models.BillingConfig{}).Error; err != nil {
-			return err
+		id := *cfg.OdooPOSID
+		entry, ok := expected[id]
+		if !ok {
+			return fmt.Errorf("POS de Odoo inesperado: %d", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("POS de Odoo duplicado: %d", id)
+		}
+		seen[id] = struct{}{}
+		expectedIncluded := entry.IncludeInReports == nil || *entry.IncludeInReports
+		actualIncluded := cfg.IncludeInReports == nil || *cfg.IncludeInReports
+		if expectedIncluded != actualIncluded {
+			return fmt.Errorf("selección no persistida para %s (%d)", cfg.PosName, id)
 		}
 	}
-
 	return nil
 }
 
@@ -206,6 +201,11 @@ func saveBillingConfigByPOS(tx *gorm.DB, cfg models.BillingConfig) error {
 
 func GetFixedCosts(c *gin.Context) {
 	pos := normalizeBillingPOSName(c.Query("pos"))
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	var costs []models.BillingFixedCost
 	q := DB.Order("sort_order, id")
 	if err := q.Find(&costs).Error; err != nil {
@@ -213,16 +213,19 @@ func GetFixedCosts(c *gin.Context) {
 		return
 	}
 	costs = normalizeFixedCostsForResponse(costs)
-	if pos != "" {
-		filtered := make([]models.BillingFixedCost, 0, len(costs))
-		for _, cost := range costs {
-			if cost.PosName == pos {
-				filtered = append(filtered, cost)
-			}
+	filtered := make([]models.BillingFixedCost, 0, len(costs))
+	for _, cost := range costs {
+		currentName, included := selection.selectedName(cost.PosName)
+		if !included {
+			continue
 		}
-		costs = filtered
+		if pos != "" && billingPOSKey(pos) != billingPOSKey(currentName) {
+			continue
+		}
+		cost.PosName = currentName
+		filtered = append(filtered, cost)
 	}
-	c.JSON(http.StatusOK, costs)
+	c.JSON(http.StatusOK, filtered)
 }
 
 func normalizeFixedCostsForResponse(costs []models.BillingFixedCost) []models.BillingFixedCost {
@@ -263,7 +266,17 @@ func CreateFixedCost(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "pos_name y name son requeridos"})
 		return
 	}
-	fc.PosName = normalizeBillingPOSName(fc.PosName)
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	currentName, included := selection.selectedName(fc.PosName)
+	if !included {
+		c.JSON(http.StatusConflict, gin.H{"error": "El punto de venta no está seleccionado para informes"})
+		return
+	}
+	fc.PosName = currentName
 	if err := DB.Create(&fc).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

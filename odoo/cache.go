@@ -59,3 +59,9 @@ func InvalidateBillingCache(year, month int) {
 	key := billingCacheKey(year, month)
 	invalidateCache(key)
 }
+
+// InvalidatePOSConfigCache fuerza una nueva lectura de pos.config en Odoo.
+func InvalidatePOSConfigCache() {
+	invalidateCache("pos_configs")
+	invalidateCache("pos_names")
+}

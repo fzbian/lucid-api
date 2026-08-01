@@ -796,6 +796,7 @@ func GetBillingMonthly(c *gin.Context) {
 
 	// Unir datos
 	type respEntry struct {
+		OdooPOSID          int64      `json:"odoo_pos_id"`
 		PosName            string     `json:"pos_name"`
 		Year               int        `json:"year"`
 		Month              int        `json:"month"`
@@ -844,20 +845,24 @@ func GetBillingMonthly(c *gin.Context) {
 		return 0
 	}
 
-	// Config de inclusión por POS
-	var cfgs []models.BillingConfig
-	if err := DB.Find(&cfgs).Error; err != nil {
+	// Una sola selección gobierna todas las secciones del informe.
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	cfgMap := buildBillingConfigMap(cfgs)
-	fixedCostMap := getFixedCostTotalsByPOS()
+	cfgMap := selection.ConfigMap
+	ventas = alignBillingMetricMapToSelection(ventas, selection)
+	margenOdoo = alignBillingMetricMapToSelection(margenOdoo, selection)
 
-	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
-	if err != nil {
-		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo: %v\n", err)
-	} else if len(odooPOSNames) > 0 {
-		_, cfgMap = mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
+	fixedCostMap := make(map[string]fixedCostTotals, len(selection.SelectedNames))
+	for pos, totals := range getFixedCostTotalsByPOS() {
+		if selectedName, included := selection.selectedName(pos); included {
+			current := fixedCostMap[selectedName]
+			current.Arriendo += totals.Arriendo
+			current.Servicios += totals.Servicios
+			fixedCostMap[selectedName] = current
+		}
 	}
 
 	// Comisión: sumar % de EmployeePOSAssignment por POS
@@ -865,8 +870,8 @@ func GetBillingMonthly(c *gin.Context) {
 	DB.Find(&posAssignments)
 	comisionPctMap := make(map[string]float64) // pos_name -> sum of commission %
 	for _, a := range posAssignments {
-		pos := normalizeBillingPOSName(a.PosName)
-		if pos == "" {
+		pos, included := selection.selectedName(a.PosName)
+		if !included {
 			continue
 		}
 		comisionPctMap[pos] += a.CommissionPercentage
@@ -878,8 +883,8 @@ func GetBillingMonthly(c *gin.Context) {
 	gastosMap := make(map[string]map[int]float64)
 	if gastos, err := getCommonExpensesBetween(start, end); err == nil {
 		for _, g := range gastos {
-			pos := normalizeBillingPOSName(g.Local)
-			if pos == "" {
+			pos, included := selection.selectedName(g.Local)
+			if !included {
 				continue
 			}
 			monthNum := int(g.Fecha.In(time.Local).Month())
@@ -900,12 +905,24 @@ func GetBillingMonthly(c *gin.Context) {
 		// Bulk: 2 queries en vez de 24 para todo el año
 		nominaByPosMap = getNominaPerPOSBulk(year)
 	}
+	for m, byPos := range nominaByPosMap {
+		aligned := make(map[string]float64, len(byPos))
+		for pos, value := range byPos {
+			if selectedName, included := selection.selectedName(pos); included {
+				aligned[selectedName] += value
+			}
+		}
+		nominaByPosMap[m] = aligned
+	}
 
 	// index existing rows
 	rowKey := func(pos string, y, m int) string { return fmt.Sprintf("%s-%d-%d", pos, y, m) }
 	rowMap := make(map[string]models.BillingMonthly)
 	for _, r := range rows {
-		pos := normalizeBillingPOSName(r.PosName)
+		pos, included := selection.selectedName(r.PosName)
+		if !included {
+			continue
+		}
 		key := rowKey(pos, r.Year, r.Month)
 		if existing, exists := rowMap[key]; exists {
 			rowMap[key] = mergeBillingMonthlyRow(existing, r, pos)
@@ -914,72 +931,14 @@ func GetBillingMonthly(c *gin.Context) {
 		rowMap[key] = r
 	}
 
-	// gather all pos/month present either in ventas or rows
+	// La lista de filas nace exclusivamente de los POS seleccionados.
 	posMonths := make(map[string]struct{})
-	for pos, months := range ventas {
-		for label := range months {
-			mn := monthNumberFromLabel(label)
-			if month > 0 && mn != month {
-				continue
-			}
-			posMonths[rowKey(normalizeBillingPOSName(pos), year, mn)] = struct{}{}
-		}
-	}
-	for _, r := range rows {
-		if month > 0 && r.Month != month {
-			continue
-		}
-		posMonths[rowKey(normalizeBillingPOSName(r.PosName), r.Year, r.Month)] = struct{}{}
-	}
-	for _, pos := range odooPOSNames {
+	for _, pos := range selection.SelectedNames {
 		if month > 0 {
 			posMonths[rowKey(pos, year, month)] = struct{}{}
 			continue
 		}
 		for m := 1; m <= 12; m++ {
-			posMonths[rowKey(pos, year, m)] = struct{}{}
-		}
-	}
-	for pos := range cfgMap {
-		if month > 0 {
-			posMonths[rowKey(pos, year, month)] = struct{}{}
-			continue
-		}
-		for m := 1; m <= 12; m++ {
-			posMonths[rowKey(pos, year, m)] = struct{}{}
-		}
-	}
-	for pos := range fixedCostMap {
-		if month > 0 {
-			posMonths[rowKey(pos, year, month)] = struct{}{}
-			continue
-		}
-		for m := 1; m <= 12; m++ {
-			posMonths[rowKey(pos, year, m)] = struct{}{}
-		}
-	}
-	for pos, monthValues := range gastosMap {
-		if month > 0 {
-			if monthValues[month] != 0 {
-				posMonths[rowKey(pos, year, month)] = struct{}{}
-			}
-			continue
-		}
-		for m, val := range monthValues {
-			if val == 0 {
-				continue
-			}
-			posMonths[rowKey(pos, year, m)] = struct{}{}
-		}
-	}
-	for m, nominaByPos := range nominaByPosMap {
-		if month > 0 && m != month {
-			continue
-		}
-		for pos, val := range nominaByPos {
-			if val == 0 {
-				continue
-			}
 			posMonths[rowKey(pos, year, m)] = struct{}{}
 		}
 	}
@@ -995,6 +954,10 @@ func GetBillingMonthly(c *gin.Context) {
 
 		if !isPOSIncludedInReports(cfgMap, pos) {
 			continue
+		}
+		var odooPOSID int64
+		if cfg, ok := findBillingConfig(cfgMap, pos); ok && cfg.OdooPOSID != nil {
+			odooPOSID = *cfg.OdooPOSID
 		}
 
 		ventaOdoo := getVenta(pos, m)
@@ -1037,6 +1000,7 @@ func GetBillingMonthly(c *gin.Context) {
 		// Si el informe ya fue confirmado, usar datos congelados
 		if row.Confirmed {
 			entries = append(entries, respEntry{
+				OdooPOSID:          odooPOSID,
 				PosName:            pos,
 				Year:               year,
 				Month:              m,
@@ -1060,6 +1024,7 @@ func GetBillingMonthly(c *gin.Context) {
 			})
 		} else {
 			entries = append(entries, respEntry{
+				OdooPOSID:          odooPOSID,
 				PosName:            pos,
 				Year:               year,
 				Month:              m,
@@ -1084,10 +1049,13 @@ func GetBillingMonthly(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"year":   year,
-		"month":  month,
-		"data":   entries,
-		"source": "db+odoo",
+		"year":               year,
+		"month":              month,
+		"data":               entries,
+		"source":             "db+odoo",
+		"pos_source":         selection.Source,
+		"selected_pos_ids":   selection.SelectedIDs,
+		"selected_pos_names": selection.SelectedNames,
 	})
 }
 
@@ -1134,17 +1102,22 @@ func ConfirmBillingMonthly(c *gin.Context) {
 		return 0
 	}
 
-	// Configs
-	var cfgs []models.BillingConfig
-	DB.Find(&cfgs)
-	cfgMap := buildBillingConfigMap(cfgs)
-	fixedCostMap := getFixedCostTotalsByPOS()
-
-	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	selection, err := loadBillingPOSSelection(false, false)
 	if err != nil {
-		fmt.Printf("[billing] warning: no se pudo listar todos los POS de Odoo al confirmar: %v\n", err)
-	} else if len(odooPOSNames) > 0 {
-		_, cfgMap = mergeBillingConfigsWithPOSNames(cfgs, odooPOSNames)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error cargando la selección de POS: " + err.Error()})
+		return
+	}
+	cfgMap := selection.ConfigMap
+	ventas = alignBillingMetricMapToSelection(ventas, selection)
+	margenOdoo = alignBillingMetricMapToSelection(margenOdoo, selection)
+	fixedCostMap := make(map[string]fixedCostTotals, len(selection.SelectedNames))
+	for pos, totals := range getFixedCostTotalsByPOS() {
+		if selectedName, included := selection.selectedName(pos); included {
+			current := fixedCostMap[selectedName]
+			current.Arriendo += totals.Arriendo
+			current.Servicios += totals.Servicios
+			fixedCostMap[selectedName] = current
+		}
 	}
 
 	// Gastos comunes (gastos_locales + movimientos operativos detectados)
@@ -1153,8 +1126,8 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	gastosMap := make(map[string]float64)
 	if gastos, err := getCommonExpensesBetween(startMonth, endMonth); err == nil {
 		for _, g := range gastos {
-			pos := normalizeBillingPOSName(g.Local)
-			if pos == "" {
+			pos, included := selection.selectedName(g.Local)
+			if !included {
 				continue
 			}
 			gastosMap[pos] += g.Monto
@@ -1162,13 +1135,21 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	}
 
 	// Nómina por POS desde asignaciones de empleados + pagos parciales
-	nominaByPos := getNominaPerPOS(body.Year, body.Month)
+	nominaByPos := make(map[string]float64)
+	for pos, value := range getNominaPerPOS(body.Year, body.Month) {
+		if selectedName, included := selection.selectedName(pos); included {
+			nominaByPos[selectedName] += value
+		}
+	}
 
 	var existingRows []models.BillingMonthly
 	DB.Where("year = ? AND month = ?", body.Year, body.Month).Find(&existingRows)
 	rowMap := make(map[string]models.BillingMonthly, len(existingRows))
 	for _, row := range existingRows {
-		pos := normalizeBillingPOSName(row.PosName)
+		pos, included := selection.selectedName(row.PosName)
+		if !included {
+			continue
+		}
 		if existing, exists := rowMap[pos]; exists {
 			rowMap[pos] = mergeBillingMonthlyRow(existing, row, pos)
 			continue
@@ -1176,30 +1157,8 @@ func ConfirmBillingMonthly(c *gin.Context) {
 		rowMap[pos] = row
 	}
 
-	// Recolectar todos los POS
-	allPOS := make(map[string]struct{})
-	if ventas != nil {
-		for pos, months := range ventas {
-			for label := range months {
-				if monthNumberFromLabel(label) == body.Month {
-					allPOS[normalizeBillingPOSName(pos)] = struct{}{}
-				}
-			}
-		}
-	}
-	for _, cfg := range cfgs {
-		allPOS[normalizeBillingPOSName(cfg.PosName)] = struct{}{}
-	}
-	for _, pos := range odooPOSNames {
-		allPOS[pos] = struct{}{}
-	}
-	for pos := range fixedCostMap {
-		allPOS[pos] = struct{}{}
-	}
-	for pos := range gastosMap {
-		allPOS[pos] = struct{}{}
-	}
-	for pos := range nominaByPos {
+	allPOS := make(map[string]struct{}, len(selection.SelectedNames))
+	for _, pos := range selection.SelectedNames {
 		allPOS[pos] = struct{}{}
 	}
 
@@ -1208,8 +1167,8 @@ func ConfirmBillingMonthly(c *gin.Context) {
 	DB.Find(&posAssignments)
 	comisionPctMap := make(map[string]float64)
 	for _, a := range posAssignments {
-		pos := normalizeBillingPOSName(a.PosName)
-		if pos == "" {
+		pos, included := selection.selectedName(a.PosName)
+		if !included {
 			continue
 		}
 		comisionPctMap[pos] += a.CommissionPercentage
@@ -1549,6 +1508,16 @@ func GetBillingGastos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "pos requerido"})
 		return
 	}
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	currentName, included := selection.selectedName(local)
+	if !included {
+		c.JSON(http.StatusConflict, gin.H{"error": "El punto de venta no está seleccionado para informes"})
+		return
+	}
 	yearStr := c.DefaultQuery("year", strconv.Itoa(time.Now().Year()))
 	monthStr := c.DefaultQuery("month", strconv.Itoa(int(time.Now().Month())))
 	year, err := strconv.Atoi(yearStr)
@@ -1571,9 +1540,10 @@ func GetBillingGastos(c *gin.Context) {
 		return
 	}
 	filtered := make([]models.GastoLocal, 0, len(gastos))
-	target := strings.ToLower(local)
+	target := billingPOSKey(currentName)
 	for _, g := range gastos {
-		if strings.ToLower(normalizeBillingPOSName(g.Local)) == target {
+		if billingPOSKey(g.Local) == target {
+			g.Local = currentName
 			filtered = append(filtered, g)
 		}
 	}
@@ -1595,9 +1565,20 @@ func CreateBillingGasto(c *gin.Context) {
 		return
 	}
 
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	currentName, included := selection.selectedName(body.Pos)
+	if !included {
+		c.JSON(http.StatusConflict, gin.H{"error": "El punto de venta no está seleccionado para informes"})
+		return
+	}
+
 	fecha := time.Date(body.Year, time.Month(body.Month), 1, 0, 0, 0, 0, time.Local)
 	gasto := models.GastoLocal{
-		Local:   normalizeBillingPOSName(body.Pos),
+		Local:   currentName,
 		Fecha:   fecha,
 		Tipo:    "GASTO_COMUN",
 		Motivo:  body.Motivo,
@@ -1707,14 +1688,20 @@ func GetBillingGastosBatch(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
-	// Agrupar por local (POS name)
+	// Solo exponer gastos de los POS seleccionados y con el nombre vigente de Odoo.
 	result := make(map[string][]models.GastoLocal)
 	for _, g := range gastos {
-		pos := normalizeBillingPOSName(g.Local)
-		if pos == "" {
+		pos, included := selection.selectedName(g.Local)
+		if !included {
 			continue
 		}
+		g.Local = pos
 		result[pos] = append(result[pos], g)
 	}
 
@@ -1734,6 +1721,11 @@ func GetNominaSummary(c *gin.Context) {
 	month, err := strconv.Atoi(monthStr)
 	if err != nil || month < 1 || month > 12 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "month inválido"})
+		return
+	}
+	selection, err := loadBillingPOSSelection(false, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -1813,14 +1805,19 @@ func GetNominaSummary(c *gin.Context) {
 		if !found {
 			continue
 		}
-		billingAmount := billingNominaAmount(p)
-		assignedUsers[a.UserID] = a.PosName
-		if byPos[a.PosName] == nil {
-			byPos[a.PosName] = &posNomina{Employees: []employeeEntry{}}
+		posName, included := selection.selectedName(a.PosName)
+		if !included {
+			assignedUsers[a.UserID] = normalizeBillingPOSName(a.PosName)
+			continue
 		}
-		byPos[a.PosName].Total += billingAmount
+		billingAmount := billingNominaAmount(p)
+		assignedUsers[a.UserID] = posName
+		if byPos[posName] == nil {
+			byPos[posName] = &posNomina{Employees: []employeeEntry{}}
+		}
+		byPos[posName].Total += billingAmount
 
-		key := posUserKey{PosName: a.PosName, UserID: a.UserID}
+		key := posUserKey{PosName: posName, UserID: a.UserID}
 		empAgg, exists := employeeAggByPos[key]
 		if !exists {
 			name := p.User.Name

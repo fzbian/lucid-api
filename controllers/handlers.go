@@ -1510,13 +1510,14 @@ func OdooGetBilling(c *gin.Context) {
 		return
 	}
 
-	odooPOSNames, err := getAllBillingPOSNamesFromOdoo()
+	selection, err := loadBillingPOSSelection(false, false)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	for _, pos := range odooPOSNames {
-		if _, ok := res[pos]; !ok {
+	res = alignBillingMetricMapToSelection(canonicalizeBillingMetricMap(res), selection)
+	for _, pos := range selection.SelectedNames {
+		if res[pos] == nil {
 			res[pos] = map[string]float64{}
 		}
 	}

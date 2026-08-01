@@ -5,7 +5,7 @@ import "time"
 // BillingConfig guarda costos fijos por local.
 type BillingConfig struct {
 	ID               uint      `json:"id" gorm:"primaryKey"`
-	OdooPOSID        *int64    `json:"odoo_pos_id" gorm:"uniqueIndex"`
+	OdooPOSID        *int64    `json:"odoo_pos_id" gorm:"uniqueIndex:idx_pos_billing_configs_odoo_pos_id"`
 	PosName          string    `json:"pos_name" gorm:"size:191"`
 	IncludeInReports *bool     `json:"include_in_reports" gorm:"default:true"`
 	Arriendo         float64   `json:"arriendo"`

@@ -2,6 +2,20 @@
 
 Este documento resume los cambios recientes en la API y cómo consumirla desde el frontend: qué enviar, qué devuelve y consideraciones de UI para renderizar correctamente.
 
+## Selección dinámica de POS en facturación
+
+- `GET /api/billing/configs?refresh=1&require_odoo=1` obtiene el catálogo actual de Odoo, sin limitarlo a nombres de locales predefinidos.
+- La identidad de cada local es `odoo_pos_id` (`pos.config.id`). `pos_name` es su nombre visible actual. El nombre solo se usa para vincular configuraciones antiguas que todavía no tienen ID.
+- Los POS recién descubiertos se crean desactivados para informes; los POS conocidos conservan su selección y sus costos.
+- `POST /api/billing/configs` recibe `entries` con todos los POS obtenidos y su `odoo_pos_id`, `pos_name`, `include_in_reports` y costos. El guardado se verifica por ID, incluso si Odoo cambió el nombre desde que se abrió la pantalla.
+- Si aparece o desaparece un POS durante la edición, el guardado devuelve 409 con el catálogo actualizado. Hay que actualizar la configuración antes de guardar.
+- Al reconocer un cambio de nombre por el mismo ID, se actualizan las referencias locales de costos, gastos, informes, asignaciones de nómina y exclusiones en una transacción, conservando sus valores.
+- Si Odoo falla, las lecturas pueden usar las configuraciones con ID guardadas; el guardado requiere sincronizar con Odoo.
+
+Para publicar este cambio, desplegar primero `lucid-api` y después `lucid-front`. Luego abrir `/billing` → Configuración de Locales → actualizar → seleccionar el nuevo POS → Guardar cambios. Ambos repositorios necesitan la actualización para eliminar los filtros antiguos.
+
+Pruebas de integración: `go test ./...` usa Odoo simulado y una base SQLite temporal; no necesita credenciales de producción.
+
 ## Resumen de cambios clave
 
 - Multi-caja en transacciones:

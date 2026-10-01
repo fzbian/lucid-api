@@ -28,7 +28,7 @@ type billingConfigEntry struct {
 	AguaAplica       bool    `json:"agua_aplica"`
 }
 
-const billingReportCatalogVersion = "2026-07-31-eight-pos-v1"
+const billingReportCatalogVersion = "2026-10-01-odoo-id-v1"
 
 func GetBillingConfigs(c *gin.Context) {
 	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -45,7 +45,7 @@ func GetBillingConfigs(c *gin.Context) {
 	}
 	c.Header("X-Billing-POS-Source", selection.Source)
 	c.Header("X-Billing-Catalog-Version", billingReportCatalogVersion)
-	c.Header("X-Billing-Catalog-Count", strconv.Itoa(len(billingReportPOSCatalog)))
+	c.Header("X-Billing-Catalog-Count", strconv.Itoa(len(selection.Configs)))
 	c.JSON(http.StatusOK, selection.Configs)
 }
 
@@ -92,9 +92,9 @@ func GetBillingConfigDiagnostics(c *gin.Context) {
 		}
 	}
 
-	expectedByKey := make(map[string]string, len(billingReportPOSCatalog))
-	for _, name := range billingReportPOSCatalog {
-		expectedByKey[billingPOSKey(name)] = name
+	expectedByKey := make(map[string]string, len(odooConfigs))
+	for _, cfg := range odooConfigs {
+		expectedByKey[billingConfigIdentity(&cfg.ID, cfg.Name)] = cfg.Name
 	}
 	seenResolved := make(map[string]int, len(resolvedNames))
 	missingNames := make([]string, 0)
@@ -102,7 +102,7 @@ func GetBillingConfigDiagnostics(c *gin.Context) {
 	duplicateNames := make([]string, 0)
 	withoutOdooID := make([]string, 0)
 	for _, cfg := range resolvedConfigs {
-		key := billingPOSKey(cfg.PosName)
+		key := billingConfigIdentity(cfg.OdooPOSID, cfg.PosName)
 		seenResolved[key]++
 		if _, expected := expectedByKey[key]; !expected {
 			unexpectedNames = append(unexpectedNames, cfg.PosName)
@@ -123,7 +123,7 @@ func GetBillingConfigDiagnostics(c *gin.Context) {
 	sort.Strings(duplicateNames)
 	sort.Strings(withoutOdooID)
 
-	operational := selectionErr == nil && len(resolvedConfigs) == len(billingReportPOSCatalog) && len(missingNames) == 0 && len(unexpectedNames) == 0 && len(duplicateNames) == 0
+	operational := odooErr == nil && selectionErr == nil && len(resolvedConfigs) == len(odooConfigs) && len(missingNames) == 0 && len(unexpectedNames) == 0 && len(duplicateNames) == 0
 	odooError := ""
 	if odooErr != nil {
 		odooError = odooErr.Error()
@@ -135,9 +135,15 @@ func GetBillingConfigDiagnostics(c *gin.Context) {
 
 	c.Header("X-Billing-Catalog-Version", billingReportCatalogVersion)
 	c.JSON(http.StatusOK, gin.H{
-		"catalog_version":    billingReportCatalogVersion,
-		"expected_pos_names": billingReportPOSCatalog,
-		"operational":        operational,
+		"catalog_version": billingReportCatalogVersion,
+		"expected_pos_names": func() []string {
+			names := make([]string, 0, len(odooConfigs))
+			for _, cfg := range odooConfigs {
+				names = append(names, cfg.Name)
+			}
+			return names
+		}(),
+		"operational": operational,
 		"odoo": gin.H{
 			"ok":      odooErr == nil,
 			"count":   len(odooConfigs),
@@ -179,27 +185,34 @@ func SaveBillingConfigs(c *gin.Context) {
 		return
 	}
 
-	currentSelection, err := loadBillingPOSSelection(true, false)
+	currentSelection, err := loadBillingPOSSelection(true, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "No se pudo cargar el catálogo de puntos de venta", "detalle": err.Error()})
-		return
-	}
-	if len(currentSelection.Configs) != len(billingReportPOSCatalog) {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "El catálogo de informes está incompleto"})
 		return
 	}
 	hasOdooPOSIDColumn := DB.Migrator().HasColumn(&models.BillingConfig{}, "OdooPOSID")
 
 	currentByKey := make(map[string]models.BillingConfig, len(currentSelection.Configs))
 	for _, cfg := range currentSelection.Configs {
-		currentByKey[billingPOSKey(cfg.PosName)] = cfg
+		currentByKey[billingConfigIdentity(cfg.OdooPOSID, cfg.PosName)] = cfg
 	}
 	entriesByKey := make(map[string]billingConfigEntry, len(body.Entries))
 	duplicateNames := make([]string, 0)
 	unknownNames := make([]string, 0)
 	for _, e := range body.Entries {
-		key := billingPOSKey(e.PosName)
+		key := billingConfigIdentity(e.OdooPOSID, e.PosName)
 		current, existsInCatalog := currentByKey[key]
+		// Accept old clients by name only when they match exactly one current POS.
+		if e.OdooPOSID == nil {
+			matches := 0
+			for candidateKey, cfg := range currentByKey {
+				if billingPOSKey(cfg.PosName) == billingPOSKey(e.PosName) {
+					current, key = cfg, candidateKey
+					matches++
+				}
+			}
+			existsInCatalog = matches == 1
+		}
 		if !existsInCatalog {
 			unknownNames = append(unknownNames, strings.TrimSpace(e.PosName))
 			continue
@@ -209,6 +222,7 @@ func SaveBillingConfigs(c *gin.Context) {
 			continue
 		}
 		e.PosName = current.PosName
+		e.OdooPOSID = current.OdooPOSID
 		entriesByKey[key] = e
 	}
 
@@ -255,7 +269,7 @@ func SaveBillingConfigs(c *gin.Context) {
 
 		persisted := make([]models.BillingConfig, 0, len(currentSelection.Configs))
 		for _, current := range currentSelection.Configs {
-			entry := entriesByKey[billingPOSKey(current.PosName)]
+			entry := entriesByKey[billingConfigIdentity(current.OdooPOSID, current.PosName)]
 			include := entry.IncludeInReports == nil || *entry.IncludeInReports
 			if current.ID == 0 {
 				current.IncludeInReports = &include
@@ -331,7 +345,7 @@ func verifyBillingConfigSelection(configs []models.BillingConfig, expected map[s
 	}
 	seen := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
-		key := billingPOSKey(cfg.PosName)
+		key := billingConfigIdentity(cfg.OdooPOSID, cfg.PosName)
 		entry, ok := expected[key]
 		if !ok {
 			return fmt.Errorf("POS inesperado: %s", cfg.PosName)

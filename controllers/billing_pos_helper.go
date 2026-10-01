@@ -3,6 +3,7 @@ package controllers
 import (
 	"atm/models"
 	"atm/odoo"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -24,20 +25,6 @@ var defaultBillingPOSAliases = map[string]string{
 	"san josé": "San Jose",
 }
 
-// billingReportPOSCatalog es el único catálogo visible en configuración e informes.
-// Los IDs de Odoo se adjuntan cuando están disponibles, pero una falla de esa
-// lectura no puede ocultar locales que forman parte del negocio.
-var billingReportPOSCatalog = []string{
-	"Bodega",
-	"Medellin",
-	"Platinum",
-	"Premium",
-	"San Fason",
-	"San Jose",
-	"Visto",
-	"Internet",
-}
-
 func getAllBillingPOSConfigsFromOdoo(forceRefresh bool) ([]odoo.POSConfigRef, error) {
 	configs, err := odoo.ListPOSConfigRefsFromEnv(forceRefresh)
 	if err != nil {
@@ -47,7 +34,7 @@ func getAllBillingPOSConfigsFromOdoo(forceRefresh bool) ([]odoo.POSConfigRef, er
 	seenIDs := make(map[int64]struct{}, len(configs))
 	out := make([]odoo.POSConfigRef, 0, len(configs))
 	for _, config := range configs {
-		normalized := normalizeBillingPOSName(config.Name)
+		normalized := strings.TrimSpace(config.Name)
 		if config.ID <= 0 || normalized == "" {
 			continue
 		}
@@ -88,34 +75,41 @@ type billingPOSSelection struct {
 	Source            string
 }
 
-func loadBillingPOSSelection(forceRefresh, _ bool) (billingPOSSelection, error) {
+func loadBillingPOSSelection(forceRefresh, requireOdoo bool) (billingPOSSelection, error) {
 	odooConfigs, odooErr := getAllBillingPOSConfigsFromOdoo(forceRefresh)
 
-	var configs []models.BillingConfig
+	if odooErr != nil && requireOdoo {
+		return billingPOSSelection{}, fmt.Errorf("no se pudo leer Odoo: %w", odooErr)
+	}
+	configs := make([]models.BillingConfig, 0)
 	var reconcileErr error
 	if odooErr == nil {
 		reconcileErr = DB.Transaction(func(tx *gorm.DB) error {
-			_, err := reconcileBillingConfigsWithOdoo(tx, odooConfigs)
+			var err error
+			configs, err = reconcileBillingConfigsWithOdoo(tx, odooConfigs)
 			return err
 		})
 	}
-	if err := DB.Find(&configs).Error; err != nil {
-		return billingPOSSelection{}, err
+	if reconcileErr != nil {
+		return billingPOSSelection{}, fmt.Errorf("sincronizando POS de Odoo: %w", reconcileErr)
 	}
-	configs, _ = mergeBillingConfigsWithPOSNames(configs, billingReportPOSCatalog)
+	if odooErr != nil {
+		if err := DB.Where("odoo_pos_id IS NOT NULL").Order("pos_name asc").Find(&configs).Error; err != nil {
+			return billingPOSSelection{}, err
+		}
+	}
+	invalidateBillingPOSAliasCache()
 
 	selection := billingPOSSelection{
 		Configs:           configs,
 		ConfigMap:         buildBillingConfigMap(configs),
 		SelectedNameByKey: make(map[string]string, len(configs)),
-		Source:            "catalog+odoo",
+		Source:            "odoo",
 	}
 	if odooErr != nil {
-		selection.Source = "catalog+saved-config-fallback"
+		selection.Source = "saved-config-fallback"
 	} else if len(odooConfigs) == 0 {
-		selection.Source = "catalog+empty-odoo-fallback"
-	} else if reconcileErr != nil {
-		selection.Source = "catalog+reconcile-error-fallback"
+		selection.Source = "empty-odoo"
 	}
 	for _, cfg := range configs {
 		if cfg.IncludeInReports == nil || !*cfg.IncludeInReports {
@@ -131,6 +125,14 @@ func loadBillingPOSSelection(forceRefresh, _ bool) (billingPOSSelection, error) 
 }
 
 func (selection billingPOSSelection) selectedName(posName string) (string, bool) {
+	for _, cfg := range selection.Configs {
+		if cfg.OdooPOSID != nil && posName == odoo.BillingPOSIDKey(*cfg.OdooPOSID) {
+			return cfg.PosName, cfg.IncludeInReports != nil && *cfg.IncludeInReports
+		}
+		if strings.EqualFold(strings.TrimSpace(posName), cfg.PosName) {
+			return cfg.PosName, cfg.IncludeInReports != nil && *cfg.IncludeInReports
+		}
+	}
 	name, ok := selection.SelectedNameByKey[billingPOSKey(posName)]
 	return name, ok
 }
@@ -199,7 +201,8 @@ func reconcileBillingConfigsWithOdoo(tx *gorm.DB, odooConfigs []odoo.POSConfigRe
 
 		odooPOSID := odooConfig.ID
 		if bestIndex == -1 {
-			include := true
+			// Newly discovered POS are available for selection without changing existing reports.
+			include := false
 			created := models.BillingConfig{
 				OdooPOSID:        &odooPOSID,
 				PosName:          odooConfig.Name,
@@ -217,6 +220,11 @@ func reconcileBillingConfigsWithOdoo(tx *gorm.DB, odooConfigs []odoo.POSConfigRe
 			consumed[existing[index].ID] = struct{}{}
 			if index != bestIndex {
 				primary = mergeBillingConfigValues(primary, existing[index])
+			}
+		}
+		if bestHasOdooID && primary.PosName != odooConfig.Name {
+			if err := syncRecognizedBillingPOSRename(tx, primary.PosName, odooConfig.Name); err != nil {
+				return nil, err
 			}
 		}
 		primary.OdooPOSID = &odooPOSID
@@ -343,6 +351,14 @@ func loadBillingPOSAliasMap() map[string]string {
 				aliases[old] = current
 			}
 		}
+		// A current Odoo name wins over historical aliases, including renames back
+		// to a previous name or reuse of an old name by another POS.
+		var currentConfigs []models.BillingConfig
+		if err := DB.Where("odoo_pos_id IS NOT NULL").Find(&currentConfigs).Error; err == nil {
+			for _, cfg := range currentConfigs {
+				delete(aliases, strings.ToLower(baseBillingPOSName(cfg.PosName)))
+			}
+		}
 	}
 
 	billingPOSAliasMu.Lock()
@@ -381,6 +397,11 @@ func buildBillingConfigMap(cfgs []models.BillingConfig) map[string]models.Billin
 		originalPosName := baseBillingPOSName(cfg.PosName)
 		canonicalPosName := normalizeBillingPOSName(cfg.PosName)
 		key := billingPOSKey(canonicalPosName)
+		if cfg.OdooPOSID != nil && *cfg.OdooPOSID > 0 {
+			canonicalPosName = strings.TrimSpace(cfg.PosName)
+			originalPosName = canonicalPosName
+			key = strings.ToLower(canonicalPosName)
+		}
 		if key == "" {
 			continue
 		}
@@ -407,6 +428,11 @@ func buildBillingConfigMap(cfgs []models.BillingConfig) map[string]models.Billin
 }
 
 func findBillingConfig(cfgMap map[string]models.BillingConfig, posName string) (models.BillingConfig, bool) {
+	for name, cfg := range cfgMap {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(posName)) {
+			return cfg, true
+		}
+	}
 	normalized := normalizeBillingPOSName(posName)
 	if cfg, ok := cfgMap[normalized]; ok {
 		return cfg, true
@@ -530,4 +556,44 @@ func mergeBillingConfigsWithPOSNames(cfgs []models.BillingConfig, posNames []str
 	})
 
 	return merged, mergedMap
+}
+
+// billingConfigIdentity uses Odoo's stable ID; names only bootstrap legacy rows.
+func billingConfigIdentity(id *int64, name string) string {
+	if id != nil && *id > 0 {
+		return odoo.BillingPOSIDKey(*id)
+	}
+	return billingPOSKey(name)
+}
+
+// Keep name-based historical records attached when an already recognized ID is renamed.
+func syncRecognizedBillingPOSRename(tx *gorm.DB, oldName, currentName string) error {
+	if oldName == currentName {
+		return nil
+	}
+	now := time.Now()
+	alias := models.BillingPOSAlias{OldPosName: oldName, CurrentPosName: currentName, Active: true, LastSyncedAt: &now}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "old_pos_name"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{"current_pos_name": currentName, "active": true, "last_synced_at": now}),
+	}).Create(&alias).Error; err != nil {
+		return err
+	}
+	var updated, archived int64
+	if err := syncBillingFixedCostsPOSName(tx, oldName, currentName, &updated, &archived); err != nil {
+		return err
+	}
+	if err := tx.Model(&models.GastoLocal{}).Where("local = ?", oldName).Update("local", currentName).Error; err != nil {
+		return err
+	}
+	if err := syncBillingMonthliesPOSName(tx, oldName, currentName, &updated); err != nil {
+		return err
+	}
+	if err := syncEmployeePOSAssignmentsPOSName(tx, oldName, currentName, &updated); err != nil {
+		return err
+	}
+	if err := syncBillingNominaAssignmentsPOSName(tx, oldName, currentName, &updated); err != nil {
+		return err
+	}
+	return syncBillingGastoExclusionsPOSName(tx, oldName, currentName, &updated)
 }

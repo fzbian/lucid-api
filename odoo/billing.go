@@ -7,6 +7,9 @@ import (
 	"time"
 )
 
+// BillingPOSIDKey preserves identity in cached metrics even if Odoo renames a POS.
+func BillingPOSIDKey(id int64) string { return fmt.Sprintf("odoo:%d", id) }
+
 // billingCacheKey genera la key de cache para billing por año/mes
 func billingCacheKey(year, month int) string {
 	return fmt.Sprintf("billing_%d_%d", year, month)
@@ -148,6 +151,11 @@ func fallbackBillingFromOrders(ctx context.Context, baseURL, db string, uid int,
 				posName = cleanPOSName(name)
 			}
 		}
+		if cfg, ok := row["config_id"].([]any); ok && len(cfg) > 0 {
+			if id, ok := cfg[0].(float64); ok && id > 0 {
+				posName = BillingPOSIDKey(int64(id))
+			}
+		}
 
 		// Date parsing
 		monthStr := ""
@@ -197,6 +205,11 @@ func fallbackBillingFromOrdersWithMargin(ctx context.Context, baseURL, db string
 		if cfg, ok := row["config_id"].([]any); ok && len(cfg) > 1 {
 			if name, ok := cfg[1].(string); ok {
 				posName = cleanPOSName(name)
+			}
+		}
+		if cfg, ok := row["config_id"].([]any); ok && len(cfg) > 0 {
+			if id, ok := cfg[0].(float64); ok && id > 0 {
+				posName = BillingPOSIDKey(int64(id))
 			}
 		}
 

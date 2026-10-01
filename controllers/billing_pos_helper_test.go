@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"atm/models"
+	"atm/odoo"
 	"testing"
 	"time"
 )
@@ -100,36 +101,51 @@ func TestVerifyBillingConfigSelectionUsesCanonicalNameWithoutOdooID(t *testing.T
 	}
 }
 
-func TestBillingReportPOSCatalogContainsTheEightBusinessLocations(t *testing.T) {
-	expected := []string{"Bodega", "Medellin", "Platinum", "Premium", "San Fason", "San Jose", "Visto", "Internet"}
-	if len(billingReportPOSCatalog) != len(expected) {
-		t.Fatalf("expected %d report POS, got %d", len(expected), len(billingReportPOSCatalog))
+func TestBillingIdentitySurvivesRename(t *testing.T) {
+	id := int64Pointer(42)
+	if billingConfigIdentity(id, "Gran San") != billingConfigIdentity(id, "Nuevo nombre") {
+		t.Fatal("rename changed Odoo identity")
 	}
-	for index, name := range expected {
-		if billingReportPOSCatalog[index] != name {
-			t.Fatalf("expected POS %q at index %d, got %q", name, index, billingReportPOSCatalog[index])
-		}
+	if billingConfigIdentity(id, "Gran San") == billingConfigIdentity(int64Pointer(43), "Gran San") {
+		t.Fatal("distinct Odoo IDs merged")
+	}
+	configs := []models.BillingConfig{{OdooPOSID: id, PosName: "Nuevo nombre", IncludeInReports: boolPointer(false)}}
+	expected := map[string]billingConfigEntry{billingConfigIdentity(id, "Gran San"): {OdooPOSID: id, PosName: "Gran San", IncludeInReports: boolPointer(false)}}
+	if err := verifyBillingConfigSelection(configs, expected); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestBillingReportCatalogMergeAlwaysExposesInternetAndFiltersUnknownPOS(t *testing.T) {
+func TestCurrentOdooNamesOverrideLegacyAliases(t *testing.T) {
 	configs := []models.BillingConfig{
-		{PosName: "Internet", IncludeInReports: boolPointer(false)},
-		{PosName: "Local de prueba", IncludeInReports: boolPointer(true)},
+		{OdooPOSID: int64Pointer(42), PosName: "Titanium", IncludeInReports: boolPointer(false)},
+		{OdooPOSID: int64Pointer(43), PosName: "San Fason", IncludeInReports: boolPointer(true)},
 	}
-	merged, cfgMap := mergeBillingConfigsWithPOSNames(configs, billingReportPOSCatalog)
-	if len(merged) != 8 {
-		t.Fatalf("expected the eight report POS, got %d", len(merged))
+	cfgMap := buildBillingConfigMap(configs)
+	if len(cfgMap) != 2 {
+		t.Fatal("legacy name alias merged distinct Odoo identities")
 	}
-	internet, found := findBillingConfig(cfgMap, "Internet")
-	if !found {
-		t.Fatal("expected Internet to remain available in the report catalog")
+	cfg, found := findBillingConfig(cfgMap, "Titanium")
+	if !found || *cfg.OdooPOSID != 42 || *cfg.IncludeInReports {
+		t.Fatal("lookup lost the current Odoo name or selection")
 	}
-	if internet.IncludeInReports == nil || *internet.IncludeInReports {
-		t.Fatal("expected the saved Internet selection to be preserved")
+}
+
+func TestBillingMetricsRecognizeRenamedPOSByID(t *testing.T) {
+	selection := billingPOSSelection{
+		Configs: []models.BillingConfig{
+			{OdooPOSID: int64Pointer(42), PosName: "Gran San nuevo", IncludeInReports: boolPointer(true)},
+			{OdooPOSID: int64Pointer(43), PosName: "Internet", IncludeInReports: boolPointer(false)},
+		},
+		SelectedNames: []string{"Gran San nuevo"},
 	}
-	if _, found := findBillingConfig(cfgMap, "Local de prueba"); found {
-		t.Fatal("expected POS outside the report catalog to be filtered")
+	values := map[string]map[string]float64{
+		odoo.BillingPOSIDKey(42): {"January": 1250},
+		odoo.BillingPOSIDKey(43): {"January": 500},
+	}
+	aligned := alignBillingMetricMapToSelection(values, selection)
+	if len(aligned) != 1 || aligned["Gran San nuevo"]["January"] != 1250 {
+		t.Fatalf("wrong selected metrics: %#v", aligned)
 	}
 }
 

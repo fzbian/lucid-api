@@ -16,6 +16,8 @@ Para publicar este cambio, desplegar primero `lucid-api` y después `lucid-front
 
 Pruebas de integración: `go test ./...` usa Odoo simulado y una base SQLite temporal; no necesita credenciales de producción.
 
+`nomina_payments.notes` utiliza `LONGTEXT`. La migración automática de GORM crea la columna con ese tipo en instalaciones nuevas y amplía las columnas existentes al iniciar, salvo que `DB_SKIP_MIGRATIONS=1`. Si el cambio ya se aplicó directamente en MySQL, el modelo conserva el mismo tipo.
+
 ## Resumen de cambios clave
 
 - Multi-caja en transacciones:

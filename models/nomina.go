@@ -71,7 +71,7 @@ type NominaPayment struct {
 
 	TotalPaid int64 `json:"total_paid"` // El neto pagado
 
-	Notes      string `gorm:"size:255" json:"notes"`
+	Notes      string `gorm:"type:longtext" json:"notes"`
 	CreatedBy  string `json:"created_by"`  // Usuario que generó el pago
 	IsSigned   bool   `json:"is_signed"`   // Si el contrato está firmado
 	SignedFile string `json:"signed_file"` // Ruta al archivo del contrato (PDF)

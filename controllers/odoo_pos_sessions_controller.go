@@ -2,81 +2,60 @@ package controllers
 
 import (
 	"atm/odoo"
-	"net/http"
-	"strconv"
-	"strings"
-
 	"github.com/gin-gonic/gin"
+	"net/http"
+	"strings"
+	"time"
 )
 
-// OdooPOSSessionsOverview godoc
-// @Summary Resumen de horarios de sesiones POS
-// @Description Devuelve las sesiones POS agrupadas por punto de venta para consultar aperturas y cierres por rango.
-// @Produce json
-// @Param from query string false "Fecha inicio (RFC3339 o YYYY-MM-DD)"
-// @Param to query string false "Fecha fin (RFC3339 o YYYY-MM-DD)"
-// @Param local query string false "Nombre del local/POS (búsqueda parcial)"
-// @Param limit query int false "Máximo de sesiones a leer en Odoo (default 5000, max 20000)"
-// @Success 200 {object} map[string]interface{}
-// @Failure 400 {object} map[string]interface{}
-// @Failure 500 {object} map[string]interface{}
-// @Router /api/odoo/pos-sessions [get]
-func OdooPOSSessionsOverview(c *gin.Context) {
-	from, fromRaw, err := parseDateFilter(c.Query("from"), false)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "formato de 'from' inválido. Use RFC3339 o YYYY-MM-DD"})
-		return
-	}
-	to, toRaw, err := parseDateFilter(c.Query("to"), true)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "formato de 'to' inválido. Use RFC3339 o YYYY-MM-DD"})
-		return
-	}
-	if !from.IsZero() && !to.IsZero() && to.Before(from) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "'to' no puede ser menor que 'from'"})
-		return
-	}
-
-	local := strings.TrimSpace(c.Query("local"))
-	limit := 5000
-	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "limit inválido"})
-			return
+// parseHoursBoundary interprets calendar dates in Colombia, independent of the
+// API host's timezone. Calendar 'to' includes the entire selected date.
+func parseHoursBoundary(raw string, end bool) (time.Time, error) {
+	if len(raw) == 10 {
+		date, err := time.ParseInLocation("2006-01-02", raw, odoo.ClosingLocation)
+		if err == nil && end {
+			date = date.AddDate(0, 0, 1)
 		}
-		limit = parsed
+		return date, err
 	}
+	return time.Parse(time.RFC3339, raw)
+}
 
+// OdooPOSSessionsOverview returns complete daily opening-hour analytics.
+func OdooPOSSessionsOverview(c *gin.Context) {
+	now := time.Now().In(odoo.ClosingLocation)
+	fromRaw, toRaw := strings.TrimSpace(c.Query("from")), strings.TrimSpace(c.Query("to"))
+	if fromRaw == "" {
+		fromRaw = now.AddDate(0, 0, -(int(now.Weekday())+6)%7).Format("2006-01-02")
+	}
+	if toRaw == "" {
+		toRaw = now.Format("2006-01-02")
+	}
+	from, err := parseHoursBoundary(fromRaw, false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Seleccione una fecha de inicio válida."})
+		return
+	}
+	to, err := parseHoursBoundary(toRaw, true)
+	if err != nil || !to.After(from) || to.Sub(from) > 366*24*time.Hour || from.After(now) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Seleccione un período válido de hasta 366 días, sin iniciar en el futuro."})
+		return
+	}
 	client, err := odoo.NewFromEnv()
+	if err == nil {
+		err = client.Authenticate()
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		_ = c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "No pudimos conectar con Odoo. Intente actualizar."})
 		return
 	}
-	if err := client.Authenticate(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Odoo Auth: " + err.Error()})
-		return
-	}
-
-	result, err := client.GetPOSSessionsHoursOverview(odoo.POSSessionHoursQuery{
-		From:  from,
-		To:    to,
-		Local: local,
-		Limit: limit,
-	})
+	result, err := client.GetPOSSessionsHoursOverview(odoo.POSSessionHoursQuery{From: from, To: to, Local: strings.TrimSpace(c.Query("local"))})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		_ = c.Error(err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": "No pudimos cargar todos los horarios. Intente nuevamente."})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"filters": gin.H{
-			"from":  fromRaw,
-			"to":    toRaw,
-			"local": local,
-			"limit": limit,
-		},
-		"totals": result.Totals,
-		"data":   result.Data,
-	})
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"filters": gin.H{"from": fromRaw, "to": toRaw}, "timezone": "America/Bogota", "generated_at": result.GeneratedAt, "totals": result.Totals, "data": result.Data})
 }

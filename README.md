@@ -266,3 +266,29 @@ NOTIFY_NUMBER_URL=https://noti.chinatownlogistic.com
 Notas:
 - El backend escucha por `API_PORT` (default `8080`). Si `API_PORT` no está definido, usa `PORT` y luego `8080`.
 - Puedes definir solo `DB_URI`; `MYSQL_URI` se mantiene como fallback de compatibilidad.
+
+## Cierres del día
+
+La nueva vista `/closings` consume `GET /api/odoo/closings?date=YYYY-MM-DD` y consulta directamente el histórico de Odoo. No necesita importar PDFs ni ejecutar el bot de WhatsApp. Publicar primero la API y después el frontend; utiliza las variables Odoo existentes (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_PASSWORD`).
+
+El día se determina por `pos.session.stop_at` en Colombia (UTC-5), con intervalo de medianoche inclusiva a medianoche siguiente exclusiva y estado `closed`. Cada reporte incluye toda la sesión, aunque se haya abierto otro día; el resumen representa ventas de sesiones cerradas ese día, no ventas filtradas por `date_order`. El botón Actualizar consulta los cierres nuevos.
+
+Se consultan sesiones, órdenes pagadas/finalizadas/facturadas, líneas, pagos y movimientos de caja mediante `search_read`, con paginación completa y consultas por lote. Los errores impiden devolver un reporte parcial como completo. El usuario técnico necesita permisos de lectura sobre `pos.session`, `pos.order`, `pos.order.line`, `pos.payment` y `account.bank.statement.line`.
+
+El PDF se genera en el navegador con jsPDF (ya presente en Lucid), sin depender del servicio anterior. Incluye un resumen ejecutivo con ventas netas, operaciones y devoluciones; medios de pago con participación neta; cuadre de caja con alertas de faltantes o sobrantes; productos vendidos; movimientos de efectivo; y detalle de ventas y reembolsos. El diseño utiliza encabezados de Lucid, tablas sin cuadrícula pesada, cifras alineadas, fecha completa en hora de Colombia y pies de página con sesión y numeración. Los saltos de página mantienen juntas las operaciones cortas y repiten encabezados de tablas extensas. Los subtotales de productos se muestran sin impuestos, como en el reporte original. Las cifras se presentan en COP. Los movimientos manuales conservan el criterio original de `payment_ref` con `POS/` y `-`, excluyendo asientos automáticos de ventas.
+
+Verificación: `go test ./...` incluye pruebas de límites de fecha, paginación, devoluciones, cambio de efectivo, errores de Odoo y días sin cierres, con Odoo simulado. El módulo no modifica sesiones ni envía mensajes.
+
+## Horarios POS: horas de apertura
+
+La vista `/pos-sessions` permite consultar día, semana (lunes a domingo), mes o rango personalizado de hasta 366 días; filtrar locales; ordenar por horas o nombre; y agrupar por local o por día. El rango personalizado se aplica con **Consultar rango**. La selección se conserva en la URL. No reutiliza las antiguas preferencias que ocultaban puntos de venta.
+
+`GET /api/odoo/pos-sessions?from=YYYY-MM-DD&to=YYYY-MM-DD` interpreta ambas fechas en Colombia; `to` incluye todo el día seleccionado. También acepta RFC3339, cuyo límite superior es exclusivo. Sin fechas consulta la semana actual hasta hoy. No incluye días futuros. Publicar primero la API y después el frontend: la nueva vista necesita el desglose `days`.
+
+El catálogo se consulta directamente en `pos.config`, sin caché ni filtros de facturación, con paginación y `active_test=false`. Se muestran todos los locales activos, aunque no tengan sesiones, y locales archivados cuando tienen sesiones relevantes. Las sesiones se consultan por intersección con el rango, incluyendo las abiertas antes del inicio. Se leen todas las páginas; `limit` antiguo no recorta los resultados. Un error de Odoo devuelve 502, sin presentar resultados incompletos como completos.
+
+Las horas confirmadas son la unión de intervalos de sesiones cerradas con fechas válidas. Se excluyen pausas y se cuentan una sola vez los solapamientos. Una sesión que cruza medianoche aporta a cada día su parte, en UTC-5. El resumen diario muestra 00:00/24:00 con indicación de continuidad; su detalle conserva las fechas y horas reales de la sesión. Las sesiones sin cierre o con fechas inválidas se señalan para revisión y no suman duración estimada. Una duración válida de cero minutos se distingue de un día sin sesiones.
+
+El promedio diario usa solo los días con sesiones cerradas y sin pendientes. Las horas confirmadas de días parcialmente pendientes sí se incluyen en el total, pero esos días no diluyen el promedio. Los totales entre locales suman horas de cada punto; no representan asistencia de una persona. El módulo es de solo lectura y muestra el responsable registrado en cada sesión sin atribuirle una jornada laboral.
+
+Pruebas: `go test ./...` cubre fronteras de fecha, turnos nocturnos, pausas, solapamientos, pendientes, ceros válidos, promedios, paginación de locales/sesiones y fallos. En el frontend, ejecutar React Scripts directamente: `CI=true node node_modules/react-scripts/bin/react-scripts.js test --watchAll=false --runInBand --runTestsByPath src/posHours.test.js` (el script npm `test` del proyecto está deshabilitado).

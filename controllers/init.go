@@ -77,6 +77,7 @@ func RegisterOdooRoutes(rg *gin.RouterGroup) {
 		r.POST("/cashout", OdooCashOut)
 		r.GET("/pos", OdooListPOS)
 		r.GET("/pos-sessions", OdooPOSSessionsOverview)
+		r.GET("/closings", OdooClosings)
 		r.GET("/billing", OdooGetBilling)
 		r.GET("/orders", OdooListInvoicedOrders)
 		r.GET("/orders/overview", OdooOrdersOverviewByPOS)
